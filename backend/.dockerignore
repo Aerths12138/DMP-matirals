@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.db
+.env
+.env.*
+.pytest_cache/
+storage/
+runtime/
+ml_models/
+tests/

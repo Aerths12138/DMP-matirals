@@ -1,0 +1,113 @@
+name: materials-dmp
+
+x-backend-environment: &backend-environment
+  DEBUG: "false"
+  SECRET_KEY: "${SECRET_KEY:?SECRET_KEY is required}"
+  USE_SQLITE: "false"
+  POSTGRES_HOST: postgres
+  POSTGRES_PORT: "5432"
+  POSTGRES_USER: "${POSTGRES_USER:-materials}"
+  POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+  POSTGRES_DB: "${POSTGRES_DB:-materials_dmp}"
+  STORAGE_BACKEND: local
+  STORAGE_ROOT: /data/materials-dmp/storage
+  CORS_ORIGINS: '${CORS_ORIGINS:-["http://localhost:8080"]}'
+  LLM_BASE_URL: "${LLM_BASE_URL:?LLM_BASE_URL is required}"
+  LLM_MODEL: "${LLM_MODEL:?LLM_MODEL is required}"
+  LLM_API_KEY: "${LLM_API_KEY:-}"
+  LLM_TIMEOUT_SECONDS: "${LLM_TIMEOUT_SECONDS:-90}"
+  LLM_MAX_TOKENS: "${LLM_MAX_TOKENS:-1200}"
+  LLM_TEMPERATURE: "${LLM_TEMPERATURE:-0}"
+  LLM_MAX_TOOL_ROUNDS: "${LLM_MAX_TOOL_ROUNDS:-4}"
+  LLM_THINKING_MODE: "${LLM_THINKING_MODE:-}"
+  LLM_EXTRA_BODY: '${LLM_EXTRA_BODY:-{}}'
+  ASSISTANT_ACTION_EXPIRE_MINUTES: "${ASSISTANT_ACTION_EXPIRE_MINUTES:-10}"
+  ASSISTANT_BACKUP_RETENTION_HOURS: "${ASSISTANT_BACKUP_RETENTION_HOURS:-24}"
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 20m
+    max-file: "5"
+
+services:
+  postgres:
+    image: "${POSTGRES_IMAGE:-postgres:15-alpine}"
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-materials}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}"
+      POSTGRES_DB: "${POSTGRES_DB:-materials_dmp}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          'pg_isready -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"',
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+    logging: *default-logging
+
+  initialize:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.production
+    image: "${BACKEND_IMAGE:-materials-dmp-backend:local}"
+    environment: *backend-environment
+    command: ["python", "-m", "scripts.init_roles"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *default-logging
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.production
+    image: "${BACKEND_IMAGE:-materials-dmp-backend:local}"
+    environment: *backend-environment
+    volumes:
+      - materials_storage:/data/materials-dmp/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    expose:
+      - "8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    depends_on:
+      initialize:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    logging: *default-logging
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.production
+    image: "${FRONTEND_IMAGE:-materials-dmp-frontend:local}"
+    ports:
+      - "${APP_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *default-logging
+
+volumes:
+  postgres_data:
+  materials_storage:

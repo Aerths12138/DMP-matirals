@@ -1,0 +1,15 @@
+venv/
+frontend/node_modules/
+frontend/dist/
+backend/*.db
+backend/**/*.db
+backend/runtime/
+backend/storage/
+backend/tests/
+backend/**/*.xlsx
+**/__pycache__/
+**/*.pyc
+.env
+.env.*
+.vercel/
+VERCEL_MIGRATION_PROGRESS.md
