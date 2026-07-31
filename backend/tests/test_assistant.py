@@ -9,6 +9,7 @@ from sqlalchemy.orm import selectinload
 
 from app.config import settings
 from app.models.analysis import AnalysisResult
+from app.models.audit import AuditLog
 from app.models.characterization import Characterization
 from app.models.data_standard import MetadataTemplate
 from app.models.experiment import Experiment
@@ -522,6 +523,10 @@ async def test_confirmation_rechecks_project_membership(api, monkeypatch):
         json={"messages": [{"role": "user", "content": "修改材料"}]},
     )
     token = preview.json()["pending_actions"][0]["token"]
+    async with api.session_factory() as session:
+        outsider = await session.get(User, api.user_ids["outsider"])
+        payload = assistant_service.decode_action_token(token, outsider)
+        action_id = uuid.UUID(payload["jti"])
 
     async with api.session_factory() as session:
         await session.execute(
@@ -538,10 +543,30 @@ async def test_confirmation_rechecks_project_membership(api, monkeypatch):
         json={"token": token},
     )
     assert confirmed.status_code == 403
+    assert confirmed.headers["x-request-id"] == str(action_id)
 
     async with api.session_factory() as session:
         unchanged = await session.get(Material, material.id)
         assert unchanged.description is None
+        denial = await session.scalar(
+            select(AuditLog).where(
+                AuditLog.request_id == action_id,
+                AuditLog.action == "DENY",
+            )
+        )
+        assert denial is not None
+        assert denial.user_id == api.user_ids["outsider"]
+        assert denial.entity_type == "material"
+        assert denial.entity_id is None
+        assert denial.changes == {
+            "source": "ai_assistant",
+            "stage": "confirmation",
+            "tool": "update_material",
+            "reason_code": "insufficient_project_access",
+        }
+        serialized_changes = json.dumps(denial.changes)
+        assert token not in serialized_changes
+        assert "Must not be written" not in serialized_changes
 
 
 @pytest.mark.asyncio

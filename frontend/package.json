@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test:assistant-confirmation": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src/components/assistant --outDir .runtime/validation --skipLibCheck src/components/assistant/actionState.ts && node scripts/test-assistant-confirmation.mjs",
+    "validate": "npm run test:assistant-confirmation && npm run build",
     "preview": "vite preview"
   },
   "dependencies": {

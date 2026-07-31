@@ -2,7 +2,7 @@
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +48,7 @@ async def assistant_chat(
 @router.post("/actions/confirm", response_model=AssistantActionConfirmResponse)
 async def confirm_assistant_action(
     body: AssistantActionConfirmRequest,
+    request: Request,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_approved_user),
 ):
@@ -64,14 +65,55 @@ async def confirm_assistant_action(
             detail="This action has already been executed",
         )
 
-    normalized, operation, entity_type, _summary, known_id = (
-        await assistant_service.prepare_write_action(
-            payload["tool"],
-            payload["arguments"],
-            db,
-            current_user,
+    try:
+        normalized, operation, entity_type, _summary, known_id = (
+            await assistant_service.prepare_write_action(
+                payload["tool"],
+                payload["arguments"],
+                db,
+                current_user,
+            )
         )
-    )
+    except HTTPException as exc:
+        if exc.status_code != status.HTTP_403_FORBIDDEN:
+            raise
+
+        if exc.detail == "Insufficient project access":
+            reason_code = "insufficient_project_access"
+        elif (
+            isinstance(exc.detail, str)
+            and exc.detail.startswith("Insufficient permissions")
+        ):
+            reason_code = "insufficient_global_permission"
+        else:
+            reason_code = "permission_recheck_failed"
+
+        try:
+            session_factory = request.app.state.audit_session_factory
+            async with session_factory() as audit_db:
+                audit_db.add(
+                    AuditLog(
+                        user_id=current_user.id,
+                        action="DENY",
+                        entity_type=payload["tool"].split("_", 1)[1],
+                        changes={
+                            "source": "ai_assistant",
+                            "stage": "confirmation",
+                            "tool": payload["tool"],
+                            "reason_code": reason_code,
+                        },
+                        request_id=action_id,
+                    )
+                )
+                await audit_db.commit()
+        except Exception:
+            pass
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=exc.detail,
+            headers={"X-Request-ID": str(action_id)},
+        ) from exc
     receipt = AssistantActionExecution(
         id=action_id,
         user_id=current_user.id,

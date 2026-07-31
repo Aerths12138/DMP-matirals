@@ -33,6 +33,11 @@ import {
   type AssistantMessage,
   type PendingAssistantAction,
 } from '../../api/assistant';
+import {
+  canConfirmAssistantAction,
+  updateAssistantActionStatus,
+  type AssistantActionStatus,
+} from './actionState';
 
 interface AIAssistantDrawerProps {
   open: boolean;
@@ -45,7 +50,7 @@ interface DisplayMessage extends AssistantMessage {
 }
 
 interface DisplayAction extends PendingAssistantAction {
-  status: 'pending' | 'executing' | 'completed' | 'cancelled';
+  status: AssistantActionStatus;
 }
 
 const WELCOME_MESSAGE = '你好，我可以回答材料领域问题，也可以查询平台数据。需要新增、修改或删除数据时，我会先生成操作预览，由你确认后才执行。';
@@ -139,9 +144,9 @@ export default function AIAssistantDrawer({
   };
 
   const updateActionStatus = (token: string, status: DisplayAction['status']) => {
-    setActions((current) =>
-      current.map((action) => (action.token === token ? { ...action, status } : action)),
-    );
+    setActions((current) => (
+      updateAssistantActionStatus(current, token, status)
+    ));
   };
 
   const confirmAction = async (action: DisplayAction) => {
@@ -345,7 +350,7 @@ export default function AIAssistantDrawer({
               </pre>
             </details>
 
-            {action.status === 'pending' && (
+            {canConfirmAssistantAction(action.status) && (
               <Space>
                 <Popconfirm
                   title={`确认${operationLabel[action.operation]}？`}
