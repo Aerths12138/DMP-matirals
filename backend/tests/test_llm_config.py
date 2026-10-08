@@ -12,6 +12,7 @@ def test_local_openai_compatible_server_does_not_require_api_key():
         LLM_BASE_URL="http://llm.internal:8000/v1/",
         LLM_MODEL="local-tool-model",
         LLM_API_KEY=None,
+        LLM_PROXY=None,
         DEEPSEEK_API_KEY=None,
     )
 
@@ -27,6 +28,7 @@ def test_legacy_deepseek_configuration_remains_supported():
         LLM_BASE_URL=None,
         LLM_MODEL=None,
         LLM_API_KEY=None,
+        LLM_PROXY=None,
         DEEPSEEK_API_KEY="legacy-key",
         DEEPSEEK_BASE_URL="https://legacy.example/v1/",
         DEEPSEEK_MODEL="legacy-model",
@@ -36,6 +38,16 @@ def test_legacy_deepseek_configuration_remains_supported():
     assert legacy.assistant_base_url == "https://legacy.example/v1"
     assert legacy.assistant_model == "legacy-model"
     assert legacy.assistant_api_key == "legacy-key"
+
+
+def test_llm_proxy_precedes_legacy_proxy():
+    configured = Settings(
+        _env_file=None,
+        LLM_PROXY="http://proxy.internal:8080",
+        DEEPSEEK_PROXY="http://legacy-proxy.internal:8080",
+    )
+
+    assert configured.assistant_proxy == "http://proxy.internal:8080"
 
 
 def test_llm_payload_uses_optional_thinking_and_auth(monkeypatch):

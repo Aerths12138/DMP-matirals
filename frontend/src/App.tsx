@@ -13,6 +13,8 @@ import AuditLogPage from './pages/Audit/AuditLogPage';
 import ProjectsPage from './pages/Projects/ProjectsPage';
 import ProjectDetailPage from './pages/Projects/ProjectDetailPage';
 import VisualizationPage from './pages/Visualization/VisualizationPage';
+import MeasurementDatasetPage from './pages/MeasurementDatasets/MeasurementDatasetPage';
+import AIAssistantPage from './pages/Assistant/AIAssistantPage';
 import ProtectedRoute from './components/auth/ProtectedRoute';
 
 export default function App() {
@@ -30,11 +32,13 @@ export default function App() {
         >
           <Route index element={<Navigate to="/dashboard" replace />} />
           <Route path="dashboard" element={<DashboardPage />} />
+          <Route path="assistant" element={<AIAssistantPage />} />
           <Route path="materials" element={<MaterialsListPage />} />
           <Route path="materials/new" element={<MaterialFormPage />} />
           <Route path="materials/:id" element={<MaterialDetailPage />} />
           <Route path="materials/:id/edit" element={<MaterialFormPage />} />
           <Route path="visualizations" element={<VisualizationPage />} />
+          <Route path="measurement-datasets/:id" element={<MeasurementDatasetPage />} />
           <Route path="search" element={<SearchPage />} />
           <Route path="import" element={<DataImportPage />} />
           <Route path="collections" element={<CollectionsPage />} />

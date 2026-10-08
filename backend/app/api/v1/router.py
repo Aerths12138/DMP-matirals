@@ -15,6 +15,7 @@ from app.api.v1 import (
     experiments,
     files,
     materials,
+    measurement_datasets,
     projects,
     properties,
     processing_methods,
@@ -30,6 +31,7 @@ api_router.include_router(auth.router)
 api_router.include_router(assistant.router)
 api_router.include_router(users.router)
 api_router.include_router(materials.router)
+api_router.include_router(measurement_datasets.router)
 api_router.include_router(projects.router)
 api_router.include_router(experiments.router)
 api_router.include_router(samples.router)

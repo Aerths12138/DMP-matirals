@@ -6,8 +6,15 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test:assistant-confirmation": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src/components/assistant --outDir .runtime/validation --skipLibCheck src/components/assistant/actionState.ts && node scripts/test-assistant-confirmation.mjs",
-    "validate": "npm run test:assistant-confirmation && npm run build",
+    "test:assistant-confirmation": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src/components/assistant --outDir .runtime/validation --skipLibCheck src/components/assistant/actionState.ts src/components/assistant/conversationState.ts && node scripts/test-assistant-confirmation.mjs",
+    "test:assistant-excel": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src --outDir .runtime/validation --skipLibCheck src/pages/Assistant/assistantFileState.ts src/pages/Assistant/assistantImportState.ts && node scripts/test-assistant-excel.mjs",
+    "test:import-alignment-flow": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src --outDir .runtime/validation --skipLibCheck src/utils/importAlignmentFlow.ts src/utils/importCorrectedExport.ts src/utils/importQuality.ts && node scripts/test-import-alignment-flow.mjs",
+    "test:import-quality": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src --outDir .runtime/validation --skipLibCheck src/utils/importNormalization.ts src/utils/importCorrectedExport.ts src/utils/importQuality.ts && node scripts/test-import-quality.mjs",
+    "test:import-normalization": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src/utils --outDir .runtime/validation --skipLibCheck src/utils/importNormalization.ts && node scripts/test-import-normalization.mjs",
+    "test:structured-import": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src --outDir .runtime/validation --skipLibCheck src/utils/importNormalization.ts src/utils/structuredImport.ts && node scripts/test-structured-import.mjs",
+    "test:measurement-visualization": "tsc --strict --target ES2022 --module ES2020 --moduleResolution node --rootDir src --outDir .runtime/validation --skipLibCheck src/utils/measurementVisualization.ts && node scripts/test-measurement-visualization.mjs",
+    "test:real-structured-import": "tsc --strict --target ES2020 --module ES2020 --moduleResolution node --rootDir src --outDir .runtime/validation --skipLibCheck src/utils/importNormalization.ts src/utils/structuredImport.ts src/utils/fileParser.ts && node scripts/test-real-structured-import.mjs",
+    "validate": "npm run test:assistant-confirmation && npm run test:assistant-excel && npm run test:import-normalization && npm run test:import-alignment-flow && npm run test:import-quality && npm run test:structured-import && npm run test:real-structured-import && npm run test:measurement-visualization && npm run build",
     "preview": "vite preview"
   },
   "dependencies": {

@@ -44,6 +44,11 @@ class Characterization(Base):
         cascade="all, delete-orphan",
     )
     analysis_results = relationship("AnalysisResult", back_populates="characterization", cascade="all, delete-orphan")
+    measurement_datasets = relationship(
+        "MeasurementDataset",
+        back_populates="characterization",
+        cascade="all, delete-orphan",
+    )
 
     def __repr__(self) -> str:
         return f"<Characterization {self.technique} on {self.sample_id}>"

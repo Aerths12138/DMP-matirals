@@ -1,4 +1,8 @@
 import apiClient from './client';
+import type { ImportRow } from './materials';
+import type { ImportAlignmentResponse } from './importAlignment';
+
+export const ASSISTANT_CHAT_TIMEOUT_MS = 180000;
 
 export type AssistantRole = 'user' | 'assistant';
 
@@ -32,7 +36,22 @@ export interface AssistantBackup {
 export interface AssistantChatResponse {
   message: string;
   pending_actions: PendingAssistantAction[];
+  pending_import?: AssistantImportPreview | null;
   model: string;
+}
+
+export interface AssistantImportPreview extends ImportAlignmentResponse {
+  filename: string;
+  sheet_name: string;
+  source_row_count: number;
+  material_count: number;
+  blocking_errors: string[];
+  import_rows: ImportRow[];
+}
+
+export interface AssistantHistoryResponse {
+  messages: AssistantMessage[];
+  updated_at: string | null;
 }
 
 export interface AssistantActionConfirmResponse {
@@ -57,9 +76,39 @@ export async function chatWithAssistant(
   const { data } = await apiClient.post<AssistantChatResponse>(
     '/assistant/chat',
     { messages, context_path: contextPath },
-    { timeout: 60000 },
+    { timeout: ASSISTANT_CHAT_TIMEOUT_MS },
   );
   return data;
+}
+
+export async function chatWithAssistantExcel(
+  messages: AssistantMessage[],
+  file: File,
+  contextPath?: string,
+  sheetName?: string,
+): Promise<AssistantChatResponse> {
+  const formData = new FormData();
+  formData.append('request', JSON.stringify({ messages, context_path: contextPath }));
+  formData.append('file', file);
+  if (sheetName) formData.append('sheet_name', sheetName);
+  const { data } = await apiClient.post<AssistantChatResponse>(
+    '/assistant/chat/excel',
+    formData,
+    {
+      headers: { 'Content-Type': 'multipart/form-data' },
+      timeout: ASSISTANT_CHAT_TIMEOUT_MS,
+    },
+  );
+  return data;
+}
+
+export async function getAssistantHistory(): Promise<AssistantHistoryResponse> {
+  const { data } = await apiClient.get<AssistantHistoryResponse>('/assistant/history');
+  return data;
+}
+
+export async function clearAssistantHistory(): Promise<void> {
+  await apiClient.delete('/assistant/history');
 }
 
 export async function confirmAssistantAction(

@@ -37,8 +37,9 @@
 |---|---:|---|
 | `DATABASE_URL` | 是 | PostgreSQL 连接地址；建议使用数据库服务提供的 pooled URL |
 | `SECRET_KEY` | 是 | JWT 签名密钥，必须是随机长字符串 |
-| `DEEPSEEK_API_KEY` | AI 助手必需 | DeepSeek API 密钥，仅配置在后端环境变量中 |
-| `DEEPSEEK_MODEL` | 否 | 默认 `deepseek-v4-flash` |
+| `LLM_BASE_URL` | AI 助手必需 | OpenAI 兼容模型服务的 `/v1` 根地址 |
+| `LLM_MODEL` | AI 助手必需 | 支持工具调用的模型名称 |
+| `LLM_API_KEY` | 视供应商而定 | 模型服务密钥，仅配置在后端环境变量中 |
 | `ASSISTANT_BACKUP_RETENTION_HOURS` | 否 | AI 修改/删除操作的临时备份保留小时数，默认 `24` |
 | `BOOTSTRAP_ADMIN_PASSWORD` | 首次部署 | 初始管理员密码，至少 12 个字符 |
 | `BOOTSTRAP_ADMIN_USERNAME` | 否 | 初始管理员用户名，默认 `admin` |

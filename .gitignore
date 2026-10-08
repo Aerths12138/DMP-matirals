@@ -1,6 +1,9 @@
 venv/
 frontend/node_modules/
 frontend/dist/
+release/
+.runtime/
+.codex/
 .vite/
 backend/*.db
 backend/**/*.db

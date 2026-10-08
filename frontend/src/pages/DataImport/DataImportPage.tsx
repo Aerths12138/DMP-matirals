@@ -2,17 +2,33 @@ import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   Upload, Button, Table, Tag, Typography, Space, Alert, Statistic,
-  Card, Row, Col, Select, Descriptions, Input, Tooltip,
+  Card, Row, Col, Select, Descriptions, Input, Tooltip, Checkbox,
 } from 'antd';
 import {
   CheckCircleOutlined, CloseCircleOutlined,
   FileTextOutlined, EyeOutlined, CloudUploadOutlined,
-  QuestionCircleOutlined,
+  QuestionCircleOutlined, RobotOutlined, DownloadOutlined,
 } from '@ant-design/icons';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { parseFile, autoMapColumns } from '../../utils/fileParser';
+import type { StructuredDatasetPreview } from '../../utils/structuredImport';
+import { cleanImportCell, parseImportNumber, type ImportCell } from '../../utils/importNormalization';
+import { downloadCorrectedImport, downloadImportQualityReport } from '../../utils/importCorrectedExport';
+import { analyzeImportQuality, summarizeImportQuality } from '../../utils/importQuality';
+import {
+  applyImportAlignmentFailure,
+  applyImportAlignmentSuccess,
+  confirmImport,
+  type ImportAlignmentViewState,
+} from '../../utils/importAlignmentFlow';
+import { alignImportData } from '../../api/importAlignment';
+import type { ImportAlignmentResponse } from '../../api/importAlignment';
 import { importMaterials } from '../../api/materials';
 import type { ImportResult } from '../../api/materials';
+import { fetchProjects } from '../../api/projects';
+import { fetchSamples } from '../../api/samples';
+import { createMeasurementDataset, updateMeasurementDataset, type MeasurementDataset } from '../../api/measurementDatasets';
+import { uploadAttachment } from '../../api/files';
 
 const { Title, Text } = Typography;
 const { Dragger } = Upload;
@@ -25,18 +41,74 @@ export default function DataImportPage() {
   const [step, setStep] = useState(0);
   const [file, setFile] = useState<File | null>(null);
   const [headers, setHeaders] = useState<string[]>([]);
-  const [rows, setRows] = useState<string[][]>([]);
+  const [rows, setRows] = useState<ImportCell[][]>([]);
   const [columnMapping, setColumnMapping] = useState<Record<string, string>>({});
   const [testGroupMapping, setTestGroupMapping] = useState<Record<string, string>>({});
   const [result, setResult] = useState<ImportResult | null>(null);
   const [parseError, setParseError] = useState<string | null>(null);
+  const [alignmentResult, setAlignmentResult] = useState<ImportAlignmentResponse | null>(null);
+  const [alignmentError, setAlignmentError] = useState<string | null>(null);
+  const [structuredDataset, setStructuredDataset] = useState<StructuredDatasetPreview | null>(null);
+  const [datasetTitle, setDatasetTitle] = useState('');
+  const [xColumnIndex, setXColumnIndex] = useState(0);
+  const [seriesColumnIndexes, setSeriesColumnIndexes] = useState<number[]>([]);
+  const [projectId, setProjectId] = useState<string>();
+  const [sampleId, setSampleId] = useState<string>();
+  const [datasetResult, setDatasetResult] = useState<MeasurementDataset | null>(null);
+
+  const projectsQuery = useQuery({
+    queryKey: ['projects', 'measurement-dataset-import'],
+    queryFn: () => fetchProjects({ page: 1, size: 100 }),
+    enabled: structuredDataset !== null && step === 1,
+  });
+  const samplesQuery = useQuery({
+    queryKey: ['samples', projectId, 'measurement-dataset-import'],
+    queryFn: () => fetchSamples({ project_id: projectId!, page: 1, size: 100 }),
+    enabled: structuredDataset !== null && step === 1 && Boolean(projectId),
+  });
+
+  const applyAlignmentState = (next: ImportAlignmentViewState) => {
+    setRows(next.rows);
+    setColumnMapping(next.columnMapping);
+    setAlignmentResult(next.alignmentResult);
+    setAlignmentError(next.alignmentError);
+  };
+
+  const currentAlignmentState = (): ImportAlignmentViewState => ({
+    rows,
+    columnMapping,
+    alignmentResult,
+    alignmentError,
+  });
+  const qualityIssues = useMemo(
+    () => analyzeImportQuality(headers, rows, columnMapping),
+    [headers, rows, columnMapping],
+  );
+  const qualitySummary = useMemo(
+    () => summarizeImportQuality(qualityIssues),
+    [qualityIssues],
+  );
 
   // Step 0: Handle file upload
   const handleFile = async (f: File) => {
     setFile(f);
     setParseError(null);
+    setAlignmentResult(null);
+    setAlignmentError(null);
     try {
       const csvData = await parseFile(f);
+      if (csvData.structuredDataset) {
+        setStructuredDataset(csvData.structuredDataset);
+        setDatasetTitle(csvData.structuredDataset.title);
+        setXColumnIndex(Math.max(0, csvData.structuredDataset.xColumnIndex));
+        setSeriesColumnIndexes(csvData.structuredDataset.suggestedSeriesColumnIndexes);
+        setProjectId(undefined);
+        setSampleId(undefined);
+        setDatasetResult(null);
+        setStep(1);
+        return false;
+      }
+      setStructuredDataset(null);
       if (csvData.headers.length === 0) {
         setParseError('文件中未检测到表头，请检查文件格式');
         return false;
@@ -71,7 +143,78 @@ export default function DataImportPage() {
     },
   });
 
-  const handleImport = () => {
+  const alignmentMutation = useMutation({
+    mutationFn: alignImportData,
+    onSuccess: (data) => {
+      applyAlignmentState(applyImportAlignmentSuccess(currentAlignmentState(), data));
+    },
+    onError: (error: any) => {
+      const message = error?.response?.data?.detail || error?.message || '格式对齐失败';
+      applyAlignmentState(applyImportAlignmentFailure(currentAlignmentState(), message));
+    },
+  });
+
+  const datasetMutation = useMutation({
+    mutationFn: async (body: Parameters<typeof createMeasurementDataset>[0]) => {
+      const created = await createMeasurementDataset(body);
+      if (!file) return created;
+      const uploaded = await uploadAttachment(file, {
+        parent_type: 'characterization',
+        parent_id: created.characterization_id,
+        file_type: 'spreadsheet',
+        description: '测量数据集原始文件',
+      });
+      return updateMeasurementDataset(created.id, { source_file_id: uploaded.id });
+    },
+    onSuccess: (data) => {
+      setDatasetResult(data);
+      setStep(2);
+      queryClient.invalidateQueries({ queryKey: ['measurement-datasets', data.characterization_id] });
+    },
+  });
+
+  const submitDatasetImport = () => {
+    if (!structuredDataset || !sampleId) return;
+    const xColumn = structuredDataset.columns[xColumnIndex];
+    const numericColumns = structuredDataset.columns.filter((column, columnIndex) => (
+      seriesColumnIndexes.includes(columnIndex)
+      && columnIndex !== xColumnIndex
+      && structuredDataset.rows.every((row) => parseImportNumber(row[columnIndex]) !== null)
+    ));
+    const points = structuredDataset.rows.flatMap((row, rowIndex) => {
+      const xValue = parseImportNumber(row[xColumnIndex]);
+      if (xValue === null) return [];
+      const values: Record<string, number> = {};
+      numericColumns.forEach((column) => {
+        const columnIndex = structuredDataset.columns.indexOf(column);
+        const value = parseImportNumber(row[columnIndex]);
+        if (value !== null) values[column.key] = value;
+      });
+      return [{ sequence: rowIndex + 1, x_value: xValue, values }];
+    });
+    datasetMutation.mutate({
+      sample_id: sampleId,
+      name: datasetTitle.trim(),
+      x_name: xColumn.name,
+      x_unit: xColumn.unit,
+      series_schema: numericColumns.map(({ key, name, unit }) => ({ key, name, unit })),
+      points,
+      provenance: {
+        source_filename: file?.name,
+        parser: 'structure-driven-v1',
+        header_row: structuredDataset.headerRow,
+        unit_row: structuredDataset.unitRow,
+        source_rows: structuredDataset.sourceRows,
+        excluded_derived_rows: structuredDataset.excludedRows,
+        metadata: structuredDataset.metadata,
+        excluded_derived_columns: structuredDataset.columns
+          .filter((_, index) => index !== xColumnIndex && !seriesColumnIndexes.includes(index))
+          .map(({ name, unit }) => ({ name, unit })),
+      },
+    });
+  };
+
+  const submitImport = () => {
     const importRows: any[] = [];
 
     rows.forEach((row) => {
@@ -93,7 +236,7 @@ export default function DataImportPage() {
       row.forEach((value, colIdx) => {
         const header = headers[colIdx];
         const target = columnMapping[header] || 'ignore';
-        const cleaned = value.trim();
+        const cleaned = cleanImportCell(value);
         if (!cleaned) return;
 
         if (target === 'ignore') return;
@@ -110,16 +253,16 @@ export default function DataImportPage() {
         } else if (target === 'result') {
           const group = testGroupMapping[header]?.trim() || '默认';
           if (!testGroups[group]) testGroups[group] = { conditions: {}, measurements: {} };
-          const num = Number(cleaned);
-          testGroups[group].measurements[baseHeader(header.trim())] = isNaN(num) ? cleaned : num;
+          const num = parseImportNumber(value);
+          testGroups[group].measurements[baseHeader(header.trim())] = num === null ? cleaned : num;
         } else if (target === 'property') {
-          const num = Number(cleaned);
-          (material.properties as Record<string, unknown>)[baseHeader(header.trim())] = isNaN(num) ? cleaned : num;
+          const num = parseImportNumber(value);
+          (material.properties as Record<string, unknown>)[baseHeader(header.trim())] = num === null ? cleaned : num;
         }
       });
 
       if (aliases.length > 0) material['aliases'] = aliases.join(',');
-      material['name'] = material['name'] || row[0]?.trim() || '';
+      material['name'] = material['name'] || (row[0] === undefined ? '' : cleanImportCell(row[0]));
       if (!material['name']) return;
 
       // Build test entries from groups
@@ -199,6 +342,16 @@ export default function DataImportPage() {
     importMutation.mutate({ rows: apiRows });
   };
 
+  const handleImport = () => confirmImport(submitImport, qualitySummary.blockingCount === 0);
+
+  const handleDownloadCorrected = () => {
+    downloadCorrectedImport(headers, rows, columnMapping, file?.name, qualityIssues);
+  };
+
+  const handleDownloadQualityReport = () => {
+    downloadImportQualityReport(headers, rows, columnMapping, qualityIssues, file?.name);
+  };
+
   const handleReset = () => {
     setStep(0);
     setFile(null);
@@ -207,6 +360,14 @@ export default function DataImportPage() {
     setColumnMapping({});
     setTestGroupMapping({});
     setResult(null);
+    setAlignmentResult(null);
+    setAlignmentError(null);
+    setStructuredDataset(null);
+    setDatasetTitle('');
+    setSeriesColumnIndexes([]);
+    setProjectId(undefined);
+    setSampleId(undefined);
+    setDatasetResult(null);
   };
 
   // --- Test group names (derived from current mappings) ---
@@ -263,6 +424,141 @@ export default function DataImportPage() {
     );
   }
 
+  if (step === 1 && structuredDataset) {
+    const xColumn = structuredDataset.columns[xColumnIndex];
+    const numericSeries = structuredDataset.columns.filter((_, columnIndex) => (
+      seriesColumnIndexes.includes(columnIndex)
+      && columnIndex !== xColumnIndex
+      && structuredDataset.rows.every((row) => parseImportNumber(row[columnIndex]) !== null)
+    ));
+    const xValuesValid = structuredDataset.rows.every((row) => parseImportNumber(row[xColumnIndex]) !== null);
+    const canImport = Boolean(sampleId && datasetTitle.trim() && xValuesValid && numericSeries.length > 0);
+    const errorDetail = (datasetMutation.error as any)?.response?.data?.detail
+      || (datasetMutation.error as Error | null)?.message;
+    const previewColumns = structuredDataset.columns.map((column, index) => ({
+      title: `${column.name}${column.unit ? ` (${column.unit})` : ''}`,
+      key: column.key,
+      render: (_: unknown, row: ImportCell[]) => row[index] === '' ? '-' : row[index],
+    }));
+    return (
+      <div>
+        <Title level={4}><EyeOutlined /> 测量数据集预览</Title>
+        <Alert
+          type="success"
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={`已识别为连续/重复测量数据：${structuredDataset.rows.length} 个有效测点`}
+          description={`字段位于第 ${structuredDataset.headerRow} 行${structuredDataset.unitRow ? `，单位位于第 ${structuredDataset.unitRow} 行` : ''}；已排除 ${structuredDataset.excludedRows.length} 条派生统计记录。确认前不会写入数据库。`}
+        />
+        {structuredDataset.excludedRows.length > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message="未导入的派生统计行"
+            description={structuredDataset.excludedRows.map((row) => `${row.label}（源文件第 ${row.sourceRow} 行）`).join('、')}
+          />
+        )}
+        {structuredDataset.metadata.length > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            style={{ marginBottom: 16 }}
+            message={`已提取 ${structuredDataset.metadata.length} 项测试说明，将保存到溯源信息`}
+            description={structuredDataset.metadata.slice(0, 8).map((item) => `${item.name}：${item.value}${item.unit ? ` ${item.unit}` : ''}`).join('；')}
+          />
+        )}
+        <Card style={{ marginBottom: 16 }}>
+          <Row gutter={[16, 16]}>
+            <Col xs={24} md={12}>
+              <Text strong>数据集名称</Text>
+              <Input value={datasetTitle} onChange={(event) => setDatasetTitle(event.target.value)} style={{ marginTop: 8 }} />
+            </Col>
+            <Col span={24}>
+              <Text strong>保存的原始数值列</Text>
+              <Checkbox.Group
+                value={seriesColumnIndexes}
+                onChange={(values) => setSeriesColumnIndexes(values as number[])}
+                options={structuredDataset.columns.map((column, index) => ({
+                  value: index,
+                  disabled: index === xColumnIndex,
+                  label: `${column.name}${column.unit ? ` (${column.unit})` : ''}${structuredDataset.suggestedSeriesColumnIndexes.includes(index) ? '（建议保留）' : '（派生列）'}`,
+                })).filter((option) => option.value !== xColumnIndex)}
+              />
+            </Col>
+            <Col xs={24} md={12}>
+              <Text strong>横坐标</Text>
+              <Select
+                value={xColumnIndex}
+                onChange={setXColumnIndex}
+                options={structuredDataset.columns.map((column, index) => ({
+                  value: index,
+                  label: `${column.name}${column.unit ? ` (${column.unit})` : ''}`,
+                }))}
+                style={{ width: '100%', marginTop: 8 }}
+              />
+            </Col>
+            <Col xs={24} md={12}>
+              <Text strong>所属项目</Text>
+              <Select
+                value={projectId}
+                onChange={(value) => { setProjectId(value); setSampleId(undefined); }}
+                options={projectsQuery.data?.items.map((project) => ({ value: project.id, label: project.name }))}
+                loading={projectsQuery.isLoading}
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择项目"
+                style={{ width: '100%', marginTop: 8 }}
+              />
+            </Col>
+            <Col xs={24} md={12}>
+              <Text strong>所属样品</Text>
+              <Select
+                value={sampleId}
+                onChange={setSampleId}
+                options={samplesQuery.data?.items.map((sample) => ({ value: sample.id, label: sample.sample_code }))}
+                loading={samplesQuery.isLoading}
+                disabled={!projectId}
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择样品"
+                style={{ width: '100%', marginTop: 8 }}
+              />
+            </Col>
+          </Row>
+        </Card>
+        {!xValuesValid && <Alert type="error" showIcon message="所选横坐标包含非数值，不能导入" style={{ marginBottom: 16 }} />}
+        {errorDetail && <Alert type="error" showIcon message="数据集导入失败" description={errorDetail} style={{ marginBottom: 16 }} />}
+        <Descriptions size="small" bordered style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="源文件">{file?.name}</Descriptions.Item>
+          <Descriptions.Item label="有效测点">{structuredDataset.rows.length}</Descriptions.Item>
+          <Descriptions.Item label="保存序列">{numericSeries.length}</Descriptions.Item>
+          <Descriptions.Item label="排除派生列">{structuredDataset.columns.length - numericSeries.length - 1}</Descriptions.Item>
+          <Descriptions.Item label="横坐标">{xColumn.name}{xColumn.unit ? ` (${xColumn.unit})` : ''}</Descriptions.Item>
+        </Descriptions>
+        <Table
+          columns={previewColumns}
+          dataSource={structuredDataset.rows.slice(0, 10)}
+          rowKey={(_, index) => String(index)}
+          pagination={false}
+          size="small"
+          scroll={{ x: 'max-content' }}
+        />
+        <Space style={{ marginTop: 16 }}>
+          <Button onClick={handleReset}>重新上传</Button>
+          <Button
+            type="primary"
+            onClick={() => confirmImport(submitDatasetImport)}
+            loading={datasetMutation.isPending}
+            disabled={!canImport}
+          >
+            确认导入数据集
+          </Button>
+        </Space>
+      </div>
+    );
+  }
+
   // --- Step 1: Preview & Column Mapping ---
   if (step === 1) {
     const previewRows = rows.slice(0, 5);
@@ -306,7 +602,7 @@ export default function DataImportPage() {
       ),
       dataIndex: h,
       key: h,
-      render: (value: string) => <Text>{value || '-'}</Text>,
+      render: (value: ImportCell) => <Text>{value === '' ? '-' : value}</Text>,
     }));
 
     const hasName = Object.values(columnMapping).includes('name');
@@ -321,26 +617,80 @@ export default function DataImportPage() {
           </Title>
           <Space>
             <Button onClick={handleReset}>重新上传</Button>
-            <Button type="primary" onClick={handleImport} loading={importMutation.isPending} disabled={!hasName}>
+            <Button
+              icon={<RobotOutlined />}
+              onClick={() => alignmentMutation.mutate({ headers, rows })}
+              loading={alignmentMutation.isPending}
+            >
+              AI 助手格式对齐
+            </Button>
+            {alignmentResult && (
+              <Button icon={<DownloadOutlined />} onClick={handleDownloadCorrected}>
+                下载订正数据
+              </Button>
+            )}
+            <Button
+              type="primary"
+              onClick={handleImport}
+              loading={importMutation.isPending}
+              disabled={!hasName || qualitySummary.blockingCount > 0}
+            >
               确认导入（{totalRows} 行）
             </Button>
           </Space>
         </div>
 
-        {!hasName && (
-          <Alert
-            type="warning"
-            showIcon
-            style={{ marginBottom: 16 }}
-            message={'请将一列映射为「材料名称」（必填）'}
-          />
-        )}
+        <Alert
+          type={qualitySummary.blockingCount > 0 ? 'error' : qualitySummary.warningCount > 0 ? 'warning' : 'success'}
+          showIcon
+          style={{ marginBottom: 16 }}
+          message={qualitySummary.issueCount === 0
+            ? '数据质量预检通过，可以确认导入'
+            : `数据质量预检：${qualitySummary.blockingCount} 个阻断问题，${qualitySummary.warningCount} 个警告`}
+          description={qualityIssues.length > 0
+            ? qualityIssues.slice(0, 5).map((issue) => (
+              <div key={`${issue.code}-${issue.sourceRow || 0}-${issue.column || ''}`}>
+                {issue.sourceRow ? `源文件第 ${issue.sourceRow} 行：` : ''}{issue.message}
+              </div>
+            ))
+            : '已检查材料名称完整性、文件内重复名称和数值列类型一致性。'}
+          action={qualityIssues.length > 0 ? (
+            <Button size="small" icon={<DownloadOutlined />} onClick={handleDownloadQualityReport}>
+              下载质量报告
+            </Button>
+          ) : undefined}
+        />
 
         <Descriptions size="small" bordered style={{ marginBottom: 16 }}>
           <Descriptions.Item label="文件">{file?.name}</Descriptions.Item>
           <Descriptions.Item label="数据行">{totalRows} 行</Descriptions.Item>
           <Descriptions.Item label="列数">{headers.length} 列</Descriptions.Item>
         </Descriptions>
+
+        {alignmentResult && (
+          <Alert
+            type="success"
+            showIcon
+            closable
+            onClose={() => setAlignmentResult(null)}
+            style={{ marginBottom: 16 }}
+            message={`格式对齐预览已应用，共规范化 ${alignmentResult.conversion_count} 个值`}
+            description={alignmentResult.warnings.length > 0
+              ? alignmentResult.warnings.join('；')
+              : '已根据系统导入字段核对列映射；仅将完整、无歧义的科学计数法文本转换为数字。请继续核对后再确认导入。'}
+          />
+        )}
+        {alignmentError && (
+          <Alert
+            type="error"
+            showIcon
+            closable
+            onClose={() => setAlignmentError(null)}
+            style={{ marginBottom: 16 }}
+            message="AI 助手格式对齐失败"
+            description={alignmentError}
+          />
+        )}
 
         {/* Test group summary */}
         {(resultCols.length > 0 || conditionCols.length > 0) && usedGroups.length > 0 && (
@@ -384,8 +734,8 @@ export default function DataImportPage() {
         <Table
           columns={previewColumns}
           dataSource={previewRows.map((row, i) => {
-            const obj: Record<string, string> = { key: String(i) };
-            headers.forEach((h, j) => { obj[h] = row[j] || ''; });
+            const obj: Record<string, ImportCell> = { key: String(i) };
+            headers.forEach((h, j) => { obj[h] = row[j] ?? ''; });
             return obj;
           })}
           pagination={false}
@@ -399,6 +749,30 @@ export default function DataImportPage() {
   // --- Step 2: Import Result ---
   const success = result?.created || 0;
   const failed = result?.failed || 0;
+
+  if (datasetResult) {
+    return (
+      <div>
+        <Title level={4}>数据集导入完成</Title>
+        <Alert
+          type="success"
+          showIcon
+          message={`已保存数据集“${datasetResult.name}”`}
+          description={`共 ${datasetResult.row_count} 个测点、${datasetResult.series_schema.length} 个数值序列；数据可通过测量数据集接口读取并用于可视化。`}
+          style={{ marginBottom: 16 }}
+        />
+        <Descriptions bordered style={{ marginBottom: 16 }}>
+          <Descriptions.Item label="数据集 ID">{datasetResult.id}</Descriptions.Item>
+          <Descriptions.Item label="横坐标">{datasetResult.x_name}{datasetResult.x_unit ? ` (${datasetResult.x_unit})` : ''}</Descriptions.Item>
+          <Descriptions.Item label="测点数量">{datasetResult.row_count}</Descriptions.Item>
+        </Descriptions>
+        <Space>
+          <Button type="primary" onClick={() => navigate(`/measurement-datasets/${datasetResult.id}`)}>查看、修改与可视化</Button>
+          <Button onClick={handleReset}>继续导入</Button>
+        </Space>
+      </div>
+    );
+  }
 
   return (
     <div>

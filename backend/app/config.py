@@ -76,8 +76,9 @@ class Settings(BaseSettings):
     LLM_API_KEY: str | None = None
     LLM_BASE_URL: str | None = None
     LLM_MODEL: str | None = None
-    LLM_TIMEOUT_SECONDS: float = Field(default=90.0, gt=0)
-    LLM_MAX_TOKENS: int = Field(default=1200, ge=1)
+    LLM_PROXY: str | None = None
+    LLM_TIMEOUT_SECONDS: float = Field(default=150.0, gt=0)
+    LLM_MAX_TOKENS: int = Field(default=4096, ge=1)
     LLM_TEMPERATURE: float = 0.0
     LLM_MAX_TOOL_ROUNDS: int = Field(default=4, ge=1, le=10)
     LLM_THINKING_MODE: str | None = None
@@ -85,7 +86,8 @@ class Settings(BaseSettings):
 
     DEEPSEEK_API_KEY: str | None = None
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
-    DEEPSEEK_MODEL: str = "deepseek-v4-flash"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    DEEPSEEK_PROXY: str | None = None
     ASSISTANT_ACTION_EXPIRE_MINUTES: int = 10
     ASSISTANT_BACKUP_RETENTION_HOURS: int = 24
 
@@ -100,6 +102,10 @@ class Settings(BaseSettings):
     @property
     def assistant_model(self) -> str:
         return self.LLM_MODEL or self.DEEPSEEK_MODEL
+
+    @property
+    def assistant_proxy(self) -> str | None:
+        return self.LLM_PROXY or self.DEEPSEEK_PROXY
 
     @property
     def assistant_is_configured(self) -> bool:

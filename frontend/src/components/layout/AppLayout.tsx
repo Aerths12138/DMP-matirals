@@ -28,12 +28,12 @@ import { fetchCurrentUser, logout } from '../../api/auth';
 import { updateUser } from '../../api/users';
 import apiClient from '../../api/client';
 import PendingApprovalPage from '../../pages/PendingApprovalPage';
-import AIAssistantDrawer from '../assistant/AIAssistantDrawer';
 
 const { Header, Sider, Content } = Layout;
 
 const ALL_MENU_ITEMS = [
   { key: '/dashboard', icon: <DashboardOutlined />, label: '仪表板', roles: ['admin', 'researcher', 'viewer'] },
+  { key: '/assistant', icon: <RobotOutlined />, label: 'AI 助手', roles: ['admin', 'researcher', 'viewer'] },
   { key: '/materials', icon: <ExperimentOutlined />, label: '材料管理', roles: ['admin', 'researcher', 'viewer'] },
   { key: '/visualizations', icon: <BarChartOutlined />, label: '数据可视化', roles: ['admin', 'researcher', 'viewer'] },
   { key: '/projects', icon: <ProjectOutlined />, label: '项目协作', roles: ['admin', 'researcher', 'viewer'] },
@@ -52,7 +52,6 @@ export default function AppLayout() {
   const { token: { colorBgContainer } } = theme.useToken();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [assistantOpen, setAssistantOpen] = useState(false);
 
   // Settings modal
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -248,7 +247,7 @@ export default function AppLayout() {
             type="primary"
             ghost
             icon={<RobotOutlined />}
-            onClick={() => setAssistantOpen(true)}
+            onClick={() => navigate('/assistant')}
             style={{ marginLeft: 'auto', marginRight: 12 }}
           >
             AI 助手
@@ -285,11 +284,6 @@ export default function AppLayout() {
         <Tabs items={settingsTabs} />
       </Modal>
 
-      <AIAssistantDrawer
-        open={assistantOpen}
-        onClose={() => setAssistantOpen(false)}
-        contextPath={location.pathname}
-      />
     </Layout>
   );
 }

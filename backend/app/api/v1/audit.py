@@ -1,5 +1,7 @@
 """Audit log viewer (admin only)."""
 
+import uuid
+
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,6 +19,10 @@ async def list_audit_logs(
     pagination: PaginationParams = Depends(),
     action: str | None = Query(default=None, description="Filter by action"),
     entity_type: str | None = Query(default=None, description="Filter by entity type"),
+    request_id: uuid.UUID | None = Query(
+        default=None,
+        description="Filter by exact request correlation ID",
+    ),
     db: AsyncSession = Depends(get_db),
     _admin: User = Depends(require_admin),
 ):
@@ -27,6 +33,8 @@ async def list_audit_logs(
         query = query.where(AuditLog.action == action)
     if entity_type:
         query = query.where(AuditLog.entity_type == entity_type)
+    if request_id:
+        query = query.where(AuditLog.request_id == request_id)
 
     count_q = select(func.count()).select_from(query.subquery())
     total = (await db.execute(count_q)).scalar() or 0
@@ -43,6 +51,7 @@ async def list_audit_logs(
             "action": log.action,
             "entity_type": log.entity_type,
             "entity_id": str(log.entity_id) if log.entity_id else None,
+            "request_id": str(log.request_id) if log.request_id else None,
             "changes": log.changes,
             "ip_address": log.ip_address,
             "created_at": log.created_at.isoformat() if log.created_at else None,

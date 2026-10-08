@@ -61,7 +61,7 @@ exit $code
 | --- | --- | --- |
 | 后端 API、模型、服务 | `backend/app/` | `backend/tests/` 中与改动同域的测试文件；无法确定时运行对应完整文件 |
 | 前端页面、组件、API 客户端 | `frontend/src/` | `frontend` 目录的 `npm run validate`；未覆盖的交互行为仍需浏览器人工验证 |
-| AI 助手对话与写工具 | `backend/app/api/v1/assistant.py`、`backend/app/services/assistant_service.py`、`frontend/src/api/assistant.ts`、`frontend/src/components/assistant/AIAssistantDrawer.tsx` | `backend/tests/test_assistant.py`；前端改动另运行 `npm run validate` |
+| AI 助手对话、Excel 读取与写工具 | `backend/app/api/v1/assistant.py`、`backend/app/services/assistant_service.py`、`backend/app/services/assistant_excel_service.py`、`frontend/src/api/assistant.ts`、`frontend/src/pages/Assistant/AIAssistantPage.tsx` | `backend/tests/test_assistant.py` 与 `backend/tests/test_assistant_excel.py`；前端改动另运行 `npm run validate` |
 | AI 修改、删除与回退 | `backend/app/api/v1/assistant.py`、`backend/app/services/assistant_backup_service.py`、`backend/app/models/assistant_backup.py` | `test_update_backup_can_be_restored_once`；涉及级联删除时再运行对应 graph restore 测试 |
 
 ## AI 写操作风险边界

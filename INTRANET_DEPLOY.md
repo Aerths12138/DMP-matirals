@@ -268,6 +268,6 @@ docker compose --env-file .env.production -f compose.production.yml logs --tail=
 
 迁移完成后，应分别用管理员和普通用户验收总记录数、项目成员关系、私有项目隔离、附件下载、AI 查询权限以及修改/删除回退。
 
-## 8. DeepSeek 兼容
+## 8. 旧配置兼容
 
-原有 `DEEPSEEK_API_KEY`、`DEEPSEEK_BASE_URL`、`DEEPSEEK_MODEL` 配置仍可使用。只要设置了 `LLM_*`，平台会优先使用通用配置，因此同一份代码可以在公网 DeepSeek 和内网 OpenAI 兼容模型之间切换。
+早期版本的供应商专用环境变量暂时仍可作为兼容回退。新部署和模型切换统一使用 `LLM_BASE_URL`、`LLM_MODEL`、`LLM_API_KEY` 与 `LLM_PROXY`，业务代码不依赖具体供应商名称。

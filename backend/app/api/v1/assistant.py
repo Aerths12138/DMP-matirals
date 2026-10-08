@@ -1,13 +1,25 @@
 """Authenticated AI assistant endpoints."""
 
+import logging
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File as FastAPIFile,
+    Form,
+    HTTPException,
+    Request,
+    Response,
+    UploadFile,
+    status,
+)
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.deps import get_current_approved_user, get_db
+from app.api.deps import get_current_approved_user, get_db, require_permission
 from app.config import settings
 from app.models.assistant import AssistantActionExecution
 from app.models.audit import AuditLog
@@ -19,10 +31,68 @@ from app.schemas.assistant import (
     AssistantBackupRestoreResponse,
     AssistantChatRequest,
     AssistantChatResponse,
+    AssistantHistoryResponse,
 )
-from app.services import assistant_backup_service, assistant_service
+from app.services import (
+    assistant_backup_service,
+    assistant_excel_service,
+    assistant_history_service,
+    assistant_service,
+)
 
 router = APIRouter(prefix="/assistant", tags=["AI Assistant"])
+logger = logging.getLogger(__name__)
+
+
+def _log_audit_failure(
+    request_id: uuid.UUID,
+    stage: str,
+    error: Exception,
+) -> None:
+    logger.error(
+        "AI assistant audit persistence failed",
+        extra={
+            "request_id": str(request_id),
+            "audit_stage": stage,
+            "error_type": type(error).__name__,
+        },
+    )
+
+class ImportAlignmentRequest(BaseModel):
+    headers: list[str]
+    rows: list[list[str | int | float | None]] = Field(default_factory=list)
+
+
+
+async def _run_assistant_chat(
+    body: AssistantChatRequest,
+    db: AsyncSession,
+    current_user: User,
+    attachments: list[dict] | None = None,
+    attachment_import: dict | None = None,
+) -> AssistantChatResponse:
+    message, pending_actions, pending_import = await assistant_service.chat(
+        [item.model_dump() for item in body.messages],
+        body.context_path,
+        db,
+        current_user,
+        attachments=attachments,
+        attachment_import=attachment_import,
+    )
+    await assistant_history_service.replace_history(
+        db,
+        current_user.id,
+        [
+            *[item.model_dump() for item in body.messages],
+            {"role": "assistant", "content": message},
+        ],
+    )
+    return AssistantChatResponse(
+        message=message,
+        pending_actions=pending_actions,
+        pending_import=pending_import,
+        model=settings.assistant_model,
+    )
 
 
 @router.post("/chat", response_model=AssistantChatResponse)
@@ -32,23 +102,77 @@ async def assistant_chat(
     current_user: User = Depends(get_current_approved_user),
 ):
     """Answer a question and prepare any requested mutations for confirmation."""
-    message, pending_actions = await assistant_service.chat(
-        [item.model_dump() for item in body.messages],
-        body.context_path,
+    return await _run_assistant_chat(body, db, current_user)
+
+
+@router.post("/chat/excel", response_model=AssistantChatResponse)
+async def assistant_excel_chat(
+    request: str = Form(...),
+    file: UploadFile = FastAPIFile(...),
+    sheet_name: str | None = Form(default=None, max_length=31),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_approved_user),
+):
+    """Read a bounded Excel preview for this chat request without storing the file."""
+    try:
+        body = AssistantChatRequest.model_validate_json(request)
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid assistant chat request",
+        ) from exc
+    workbook = await assistant_excel_service.parse_excel_upload_bundle(
+        file,
+        sheet_name,
+    )
+    return await _run_assistant_chat(
+        body,
         db,
         current_user,
+        [workbook["preview"]],
+        workbook["import_data"],
     )
-    return AssistantChatResponse(
-        message=message,
-        pending_actions=pending_actions,
-        model=settings.assistant_model,
+
+
+@router.get("/history", response_model=AssistantHistoryResponse)
+async def get_assistant_history(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_approved_user),
+):
+    """Load the current user's latest assistant conversation."""
+    history = await assistant_history_service.get_history(db, current_user.id)
+    if history is None:
+        return AssistantHistoryResponse()
+    return AssistantHistoryResponse(
+        messages=history.messages,
+        updated_at=history.updated_at,
     )
+
+
+@router.delete("/history", status_code=status.HTTP_204_NO_CONTENT)
+async def clear_assistant_history(
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_approved_user),
+):
+    """Clear only the current user's saved assistant conversation."""
+    await assistant_history_service.clear_history(db, current_user.id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/import/align")
+async def align_assistant_import(
+    body: ImportAlignmentRequest,
+    _current_user: User = Depends(require_permission("import:create")),
+):
+    """Return a deterministic import-alignment preview without writing data."""
+    return assistant_service.align_import_data(body.headers, body.rows)
 
 
 @router.post("/actions/confirm", response_model=AssistantActionConfirmResponse)
 async def confirm_assistant_action(
     body: AssistantActionConfirmRequest,
     request: Request,
+    response: Response,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_approved_user),
 ):
@@ -106,8 +230,8 @@ async def confirm_assistant_action(
                     )
                 )
                 await audit_db.commit()
-        except Exception:
-            pass
+        except Exception as audit_error:
+            _log_audit_failure(action_id, "permission_denied", audit_error)
 
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -151,22 +275,30 @@ async def confirm_assistant_action(
     )
     await assistant_backup_service.finalize_backup(backup, db)
     receipt.entity_id = uuid.UUID(entity_id)
-    db.add(
-        AuditLog(
-            user_id=current_user.id,
-            action=operation.upper(),
-            entity_type=entity_type,
-            entity_id=uuid.UUID(entity_id),
-            changes={
-                "source": "ai_assistant",
-                "tool": payload["tool"],
-                "arguments": normalized,
-                "backup_id": str(backup.id) if backup else None,
-            },
-            request_id=action_id,
+    try:
+        db.add(
+            AuditLog(
+                user_id=current_user.id,
+                action=operation.upper(),
+                entity_type=entity_type,
+                entity_id=uuid.UUID(entity_id),
+                changes={
+                    "source": "ai_assistant",
+                    "tool": payload["tool"],
+                    "backup_id": str(backup.id) if backup else None,
+                },
+                request_id=action_id,
+            )
         )
-    )
-    await db.flush()
+        await db.flush()
+    except Exception as audit_error:
+        await db.rollback()
+        _log_audit_failure(action_id, "action_execution", audit_error)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI action was not applied because audit persistence failed",
+            headers={"X-Request-ID": str(action_id)},
+        ) from audit_error
 
     action_text = {"create": "创建", "update": "更新", "delete": "删除"}[operation]
     entity_label = {
@@ -179,8 +311,17 @@ async def confirm_assistant_action(
         "test_measurement": "测试测量值",
         "characterization": "表征记录",
     }[entity_type]
+    response_message = f"已{action_text}{entity_label}。"
+    await assistant_history_service.append_message(
+        db,
+        current_user.id,
+        "assistant",
+        response_message,
+    )
+    response.headers["X-Request-ID"] = str(action_id)
     return AssistantActionConfirmResponse(
-        message=f"已{action_text}{entity_label}。",
+        message=response_message,
+        request_id=action_id,
         entity_type=entity_type,
         entity_id=entity_id,
         data=data,
@@ -229,8 +370,15 @@ async def restore_assistant_backup(
         )
     )
     await db.flush()
+    response_message = f"已回退到“{backup.entity_name}”操作前的版本。"
+    await assistant_history_service.append_message(
+        db,
+        current_user.id,
+        "assistant",
+        response_message,
+    )
     return AssistantBackupRestoreResponse(
-        message=f"已回退到“{backup.entity_name}”操作前的版本。",
+        message=response_message,
         backup_id=backup.id,
         entity_type=backup.entity_type,
         entity_id=backup.entity_id,

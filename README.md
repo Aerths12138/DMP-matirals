@@ -47,7 +47,9 @@ npm run dev
 启用前请复制 `backend/.env.example` 为 `backend/.env`，并填写：
 
 ```env
-DEEPSEEK_API_KEY=你的_DeepSeek_API_Key
+LLM_BASE_URL=https://你的模型服务地址/v1
+LLM_MODEL=支持工具调用的模型名称
+LLM_API_KEY=模型服务_API_Key
 ```
 
 ## 技术栈

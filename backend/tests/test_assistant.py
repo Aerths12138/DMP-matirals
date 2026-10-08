@@ -3,8 +3,11 @@
 import json
 import uuid
 
+import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import delete, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.config import settings
@@ -29,8 +32,26 @@ from app.utils.security import create_access_token
 
 
 CHAT_URL = "/api/v1/assistant/chat"
+HISTORY_URL = "/api/v1/assistant/history"
 CONFIRM_URL = "/api/v1/assistant/actions/confirm"
 BACKUPS_URL = "/api/v1/assistant/backups"
+AUDIT_URL = "/api/v1/audit-logs"
+
+
+async def _create_admin_headers(api, suffix: str):
+    async with api.session_factory() as session:
+        role = Role(name="admin", description="Administrator")
+        user = User(
+            username=f"assistant_admin_{suffix}",
+            email=f"assistant-admin-{suffix}@example.com",
+            hashed_password="unused",
+            is_active=True,
+            is_approved=True,
+            role=role,
+        )
+        session.add(user)
+        await session.commit()
+        return {"Authorization": f"Bearer {create_access_token(user.id)}"}
 
 
 async def _create_ai_data_manager(api, suffix: str):
@@ -111,7 +132,9 @@ async def _create_ai_data_manager(api, suffix: str):
 
 
 @pytest.mark.asyncio
-async def test_assistant_requires_backend_api_key(api, monkeypatch):
+async def test_assistant_requires_llm_configuration(api, monkeypatch):
+    monkeypatch.setattr(settings, "LLM_BASE_URL", None)
+    monkeypatch.setattr(settings, "LLM_API_KEY", None)
     monkeypatch.setattr(settings, "DEEPSEEK_API_KEY", None)
 
     response = await api.client.post(
@@ -121,15 +144,117 @@ async def test_assistant_requires_backend_api_key(api, monkeypatch):
     )
 
     assert response.status_code == 503
-    assert "DEEPSEEK_API_KEY" in response.json()["detail"]
+    assert "LLM_BASE_URL" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_llm_timeout_has_specific_gateway_error(monkeypatch):
+    class TimeoutClient:
+        def __init__(self, **kwargs):
+            assert kwargs["timeout"] == 150
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ReadTimeout("model response timed out")
+
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "LLM_TIMEOUT_SECONDS", 150)
+    monkeypatch.setattr(assistant_service.httpx, "AsyncClient", TimeoutClient)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await assistant_service.request_llm(
+            [{"role": "user", "content": "分析这段长文本"}],
+            None,
+        )
+
+    assert exc_info.value.status_code == 504
+    assert "150 秒" in exc_info.value.detail
+    assert "分段发送" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_llm_connection_error_has_actionable_gateway_error(monkeypatch):
+    class ConnectClient:
+        def __init__(self, **kwargs):
+            assert kwargs["trust_env"] is False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, *args, **kwargs):
+            raise httpx.ConnectError("network is unavailable")
+
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(settings, "LLM_PROXY", None)
+    monkeypatch.setattr(settings, "DEEPSEEK_PROXY", None)
+    monkeypatch.setattr(assistant_service.httpx, "AsyncClient", ConnectClient)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await assistant_service.request_llm(
+            [{"role": "user", "content": "查询材料"}],
+            None,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert "大模型服务" in exc_info.value.detail
+    assert "LLM_PROXY" in exc_info.value.detail
+
+
+@pytest.mark.asyncio
+async def test_llm_length_stop_returns_actionable_message(monkeypatch):
+    class LengthResponse:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "length",
+                        "message": {"role": "assistant", "content": ""},
+                    }
+                ]
+            }
+
+    class LengthClient:
+        def __init__(self, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, *args, **kwargs):
+            return LengthResponse()
+
+    monkeypatch.setattr(settings, "LLM_API_KEY", "test-key")
+    monkeypatch.setattr(assistant_service.httpx, "AsyncClient", LengthClient)
+
+    message = await assistant_service.request_llm(
+        [{"role": "user", "content": "生成一份长报告"}],
+        None,
+    )
+
+    assert "输出达到长度上限" in message["content"]
+    assert "分段发送" in message["content"]
 
 
 @pytest.mark.asyncio
 async def test_assistant_returns_plain_answer(api, monkeypatch):
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         return {"role": "assistant", "content": "这是测试回答。"}
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=api.headers["researcher"],
@@ -142,6 +267,40 @@ async def test_assistant_returns_plain_answer(api, monkeypatch):
     assert response.status_code == 200
     assert response.json()["message"] == "这是测试回答。"
     assert response.json()["pending_actions"] == []
+
+
+@pytest.mark.asyncio
+async def test_assistant_history_is_persisted_and_user_scoped(api, monkeypatch):
+    async def fake_llm(messages, tools):
+        return {"role": "assistant", "content": "这是保存后的回答。"}
+
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
+    response = await api.client.post(
+        CHAT_URL,
+        headers=api.headers["researcher"],
+        json={"messages": [{"role": "user", "content": "请记住这个问题"}]},
+    )
+    assert response.status_code == 200
+
+    history = await api.client.get(HISTORY_URL, headers=api.headers["researcher"])
+    assert history.status_code == 200
+    assert history.json()["messages"] == [
+        {"role": "user", "content": "请记住这个问题"},
+        {"role": "assistant", "content": "这是保存后的回答。"},
+    ]
+    assert history.json()["updated_at"] is not None
+
+    other_history = await api.client.get(HISTORY_URL, headers=api.headers["viewer"])
+    assert other_history.status_code == 200
+    assert other_history.json() == {"messages": [], "updated_at": None}
+
+    cleared = await api.client.delete(HISTORY_URL, headers=api.headers["researcher"])
+    assert cleared.status_code == 204
+    history_after_clear = await api.client.get(
+        HISTORY_URL,
+        headers=api.headers["researcher"],
+    )
+    assert history_after_clear.json() == {"messages": [], "updated_at": None}
 
 
 @pytest.mark.asyncio
@@ -169,7 +328,7 @@ async def test_read_tool_respects_private_project_visibility(api, monkeypatch):
 
     captured_tool_result = {}
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if messages[-1]["role"] == "tool":
             captured_tool_result.update(json.loads(messages[-1]["content"]))
             return {"role": "assistant", "content": "查询完成。"}
@@ -188,7 +347,7 @@ async def test_read_tool_respects_private_project_visibility(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=api.headers["outsider"],
@@ -202,7 +361,9 @@ async def test_read_tool_respects_private_project_visibility(api, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_create_requires_confirmation_and_token_is_single_use(api, monkeypatch):
-    async def fake_deepseek(messages, tools):
+    admin_headers = await _create_admin_headers(api, "success_audit")
+
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认新增材料。"}
         return {
@@ -226,7 +387,7 @@ async def test_create_requires_confirmation_and_token_is_single_use(api, monkeyp
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     chat_response = await api.client.post(
         CHAT_URL,
         headers=api.headers["researcher"],
@@ -244,13 +405,35 @@ async def test_create_requires_confirmation_and_token_is_single_use(api, monkeyp
     assert count_before == 0
 
     token = pending[0]["token"]
+    async with api.session_factory() as session:
+        researcher = await session.get(User, api.user_ids["researcher"])
+        payload = assistant_service.decode_action_token(token, researcher)
+        action_id = uuid.UUID(payload["jti"])
+
     confirm_response = await api.client.post(
         CONFIRM_URL,
         headers=api.headers["researcher"],
         json={"token": token},
     )
     assert confirm_response.status_code == 200
+    assert confirm_response.headers["x-request-id"] == str(action_id)
+    assert confirm_response.json()["request_id"] == str(action_id)
     assert confirm_response.json()["data"]["name"] == "AI Created Alloy"
+
+    audit_response = await api.client.get(
+        AUDIT_URL,
+        params={"request_id": str(action_id)},
+        headers=admin_headers,
+    )
+    assert audit_response.status_code == 200, audit_response.text
+    assert audit_response.json()["total"] == 1
+    audit_item = audit_response.json()["items"][0]
+    assert audit_item["request_id"] == str(action_id)
+    assert audit_item["action"] == "CREATE"
+    serialized_audit = json.dumps(audit_response.json())
+    assert token not in serialized_audit
+    assert "AI Created Alloy" not in serialized_audit
+    assert "FeNi" not in serialized_audit
 
     async with api.session_factory() as session:
         count_after = await session.scalar(
@@ -267,10 +450,99 @@ async def test_create_requires_confirmation_and_token_is_single_use(api, monkeyp
 
 
 @pytest.mark.asyncio
+async def test_audit_failure_is_observable_and_rolls_back_write(
+    api,
+    monkeypatch,
+    caplog,
+):
+    sensitive_name = "Sensitive Audit Failure Alloy"
+    sensitive_formula = "SecretFormula42"
+
+    async def fake_llm(messages, tools):
+        if tools is None:
+            return {"role": "assistant", "content": "Please confirm."}
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_audit_failure",
+                    "type": "function",
+                    "function": {
+                        "name": "create_material",
+                        "arguments": json.dumps(
+                            {
+                                "name": sensitive_name,
+                                "material_type": "metal",
+                                "formula_string": sensitive_formula,
+                            }
+                        ),
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
+    preview = await api.client.post(
+        CHAT_URL,
+        headers=api.headers["researcher"],
+        json={"messages": [{"role": "user", "content": "Create material"}]},
+    )
+    token = preview.json()["pending_actions"][0]["token"]
+    async with api.session_factory() as session:
+        researcher = await session.get(User, api.user_ids["researcher"])
+        action_id = uuid.UUID(
+            assistant_service.decode_action_token(token, researcher)["jti"]
+        )
+
+    original_flush = AsyncSession.flush
+
+    async def fail_audit_flush(session, objects=None):
+        if any(isinstance(item, AuditLog) for item in session.new):
+            raise RuntimeError(
+                f"simulated audit failure {token} {sensitive_name} {sensitive_formula}"
+            )
+        return await original_flush(session, objects)
+
+    monkeypatch.setattr(AsyncSession, "flush", fail_audit_flush)
+    caplog.set_level("ERROR", logger="app.api.v1.assistant")
+
+    confirmed = await api.client.post(
+        CONFIRM_URL,
+        headers=api.headers["researcher"],
+        json={"token": token},
+    )
+    assert confirmed.status_code == 503
+    assert confirmed.headers["x-request-id"] == str(action_id)
+
+    async with api.session_factory() as session:
+        material_count = await session.scalar(
+            select(func.count(Material.id)).where(Material.name == sensitive_name)
+        )
+        audit_count = await session.scalar(
+            select(func.count(AuditLog.id)).where(AuditLog.request_id == action_id)
+        )
+    assert material_count == 0
+    assert audit_count == 0
+
+    record = next(
+        item
+        for item in caplog.records
+        if item.getMessage() == "AI assistant audit persistence failed"
+    )
+    assert record.request_id == str(action_id)
+    assert record.audit_stage == "action_execution"
+    assert record.error_type == "RuntimeError"
+    assert token not in caplog.text
+    assert sensitive_name not in caplog.text
+    assert sensitive_formula not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_viewer_cannot_prepare_create_action(api, monkeypatch):
     calls = 0
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -299,7 +571,7 @@ async def test_viewer_cannot_prepare_create_action(api, monkeypatch):
         assert json.loads(messages[-1]["content"])["status"] == 403
         return {"role": "assistant", "content": "你没有新增材料的权限。"}
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=api.headers["viewer"],
@@ -341,7 +613,7 @@ async def test_project_editor_can_update_material_through_assistant(api, monkeyp
         await session.commit()
         material_id = str(material.id)
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认修改。"}
         return {
@@ -364,7 +636,7 @@ async def test_project_editor_can_update_material_through_assistant(api, monkeyp
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     preview = await api.client.post(
         CHAT_URL,
         headers=api.headers["outsider"],
@@ -417,7 +689,7 @@ async def test_project_viewer_cannot_update_material(api, monkeypatch):
 
     calls = 0
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -448,7 +720,7 @@ async def test_project_viewer_cannot_update_material(api, monkeypatch):
         assert tool_result["status"] == 403
         return {"role": "assistant", "content": "你只有查看权限。"}
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=api.headers["outsider"],
@@ -464,6 +736,8 @@ async def test_project_viewer_cannot_update_material(api, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_confirmation_rechecks_project_membership(api, monkeypatch):
+    admin_headers = await _create_admin_headers(api, "denial_audit")
+
     async with api.session_factory() as session:
         project = Project(name="Revoked Project", owner_id=api.user_ids["researcher"])
         session.add(project)
@@ -493,7 +767,7 @@ async def test_confirmation_rechecks_project_membership(api, monkeypatch):
         material_id = str(material.id)
         project_id = project.id
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认修改。"}
         return {
@@ -516,7 +790,7 @@ async def test_confirmation_rechecks_project_membership(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     preview = await api.client.post(
         CHAT_URL,
         headers=api.headers["outsider"],
@@ -544,6 +818,18 @@ async def test_confirmation_rechecks_project_membership(api, monkeypatch):
     )
     assert confirmed.status_code == 403
     assert confirmed.headers["x-request-id"] == str(action_id)
+
+    queried = await api.client.get(
+        AUDIT_URL,
+        params={"request_id": str(action_id)},
+        headers=admin_headers,
+    )
+    assert queried.status_code == 200, queried.text
+    assert queried.json()["total"] == 1
+    assert queried.json()["items"][0]["request_id"] == str(action_id)
+    serialized_query = json.dumps(queried.json())
+    assert token not in serialized_query
+    assert "Must not be written" not in serialized_query
 
     async with api.session_factory() as session:
         unchanged = await session.get(Material, material.id)
@@ -617,7 +903,7 @@ async def test_search_only_returns_entity_types_allowed_by_global_role(api, monk
 
     captured_result = {}
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if messages[-1]["role"] == "tool":
             captured_result.update(json.loads(messages[-1]["content"])["data"])
             return {"role": "assistant", "content": "查询完成。"}
@@ -640,7 +926,7 @@ async def test_search_only_returns_entity_types_allowed_by_global_role(api, monk
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=scoped_headers,
@@ -663,7 +949,7 @@ async def test_update_backup_can_be_restored_once(api, monkeypatch):
         await session.commit()
         material_id = str(material.id)
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认修改。"}
         return {
@@ -686,7 +972,7 @@ async def test_update_backup_can_be_restored_once(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     preview = await api.client.post(
         CHAT_URL,
         headers=api.headers["researcher"],
@@ -794,7 +1080,7 @@ async def test_deleted_material_graph_can_be_restored(api, monkeypatch):
             "Authorization": f"Bearer {create_access_token(deleter.id)}"
         }
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认删除。"}
         return {
@@ -812,7 +1098,7 @@ async def test_deleted_material_graph_can_be_restored(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     preview = await api.client.post(
         CHAT_URL,
         headers=deleter_headers,
@@ -938,7 +1224,7 @@ async def test_deleted_project_graph_can_be_restored(api, monkeypatch):
             "Authorization": f"Bearer {create_access_token(owner.id)}"
         }
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认删除项目。"}
         return {
@@ -956,7 +1242,7 @@ async def test_deleted_project_graph_can_be_restored(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     preview = await api.client.post(
         CHAT_URL,
         headers=owner_headers,
@@ -1034,7 +1320,7 @@ async def test_followup_delete_can_search_inspect_and_prepare_confirmation(api, 
 
     calls = 0
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         nonlocal calls
         calls += 1
         if calls == 1:
@@ -1092,7 +1378,7 @@ async def test_followup_delete_can_search_inspect_and_prepare_confirmation(api, 
         assert tools is None
         return {"role": "assistant", "content": "已生成删除预览，请确认。"}
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=deleter_headers,
@@ -1155,7 +1441,7 @@ async def test_semantic_experiment_and_sample_tools_confirm_and_restore(api, mon
         "description": "通过自然语言创建",
     }
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "已生成操作预览，请确认。"}
         advertised = {item["function"]["name"] for item in tools}
@@ -1175,7 +1461,7 @@ async def test_semantic_experiment_and_sample_tools_confirm_and_restore(api, mon
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     experiment_preview = await api.client.post(
         CHAT_URL,
         headers=api.headers["researcher"],
@@ -1367,7 +1653,7 @@ async def test_semantic_delete_experiment_restores_dependent_graph(api, monkeypa
             "Authorization": f"Bearer {create_access_token(deleter.id)}"
         }
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认删除实验。"}
         assert "delete_experiment" in {
@@ -1390,7 +1676,7 @@ async def test_semantic_delete_experiment_restores_dependent_graph(api, monkeypa
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     preview = await api.client.post(
         CHAT_URL,
         headers=deleter_headers,
@@ -1467,13 +1753,13 @@ async def test_exact_single_search_result_delete_skips_model_loop(api, monkeypat
             "Authorization": f"Bearer {create_access_token(deleter.id)}"
         }
 
-    async def unexpected_deepseek(messages, tools):
-        raise AssertionError("Contextual delete must not call DeepSeek")
+    async def unexpected_llm(messages, tools):
+        raise AssertionError("Contextual delete must not call the LLM")
 
     monkeypatch.setattr(
         assistant_service,
-        "request_deepseek",
-        unexpected_deepseek,
+        "request_llm",
+        unexpected_llm,
     )
     response = await api.client.post(
         CHAT_URL,
@@ -1528,7 +1814,7 @@ async def test_property_test_and_characterization_crud_tools(api, monkeypatch):
     headers, ids = await _create_ai_data_manager(api, "crud")
     next_call = {}
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认本次数据操作。"}
         advertised = {item["function"]["name"] for item in tools}
@@ -1548,7 +1834,7 @@ async def test_property_test_and_characterization_crud_tools(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
 
     async def prepare_and_confirm(tool, arguments):
         next_call.update(tool=tool, arguments=arguments)
@@ -1755,7 +2041,7 @@ async def test_delete_property_test_and_characterization_restores_children(
 
     next_call = {}
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认删除。"}
         assert next_call["tool"] in {
@@ -1776,7 +2062,7 @@ async def test_delete_property_test_and_characterization_restores_children(
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
 
     async def delete_and_restore(entity_type, child_model=None, child_id=None):
         tool = f"delete_{entity_type}"
@@ -1848,7 +2134,7 @@ async def test_independent_test_measurement_crud_and_rollback(api, monkeypatch):
 
     next_call = {}
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if tools is None:
             return {"role": "assistant", "content": "请确认测量值操作。"}
         assert next_call["tool"] in {
@@ -1869,7 +2155,7 @@ async def test_independent_test_measurement_crud_and_rollback(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
 
     async def prepare_and_confirm(tool, arguments):
         next_call.update(tool=tool, arguments=arguments)
@@ -2021,7 +2307,7 @@ async def test_test_measurement_read_respects_private_project(api, monkeypatch):
 
     captured = {}
 
-    async def fake_deepseek(messages, tools):
+    async def fake_llm(messages, tools):
         if messages[-1]["role"] == "tool":
             captured.update(json.loads(messages[-1]["content"]))
             return {"role": "assistant", "content": "查询完成。"}
@@ -2045,7 +2331,7 @@ async def test_test_measurement_read_respects_private_project(api, monkeypatch):
             ],
         }
 
-    monkeypatch.setattr(assistant_service, "request_deepseek", fake_deepseek)
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
     response = await api.client.post(
         CHAT_URL,
         headers=outsider_headers,

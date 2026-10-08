@@ -1,12 +1,14 @@
 """Audit logging middleware — captures mutating requests for compliance."""
 
+import logging
 import uuid
-from datetime import datetime
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from app.models.audit import AuditLog
+
+logger = logging.getLogger(__name__)
 
 
 class AuditMiddleware(BaseHTTPMiddleware):
@@ -14,7 +16,11 @@ class AuditMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next):
         # Only audit mutating methods
-        should_audit = request.method in ("POST", "PUT", "PATCH", "DELETE")
+        endpoint_owns_audit = request.url.path == "/api/v1/assistant/actions/confirm"
+        should_audit = (
+            request.method in ("POST", "PUT", "PATCH", "DELETE")
+            and not endpoint_owns_audit
+        )
 
         response = await call_next(request)
 
@@ -41,6 +47,7 @@ class AuditMiddleware(BaseHTTPMiddleware):
             user_id = getattr(request.state, "user_id", None)
 
             # Fire-and-forget: don't block the response for audit
+            request_id = uuid.uuid4()
             try:
                 session_factory = request.app.state.audit_session_factory
                 async with session_factory() as session:
@@ -51,11 +58,20 @@ class AuditMiddleware(BaseHTTPMiddleware):
                         entity_id=parsed_entity_id,
                         ip_address=request.client.host if request.client else None,
                         user_agent=request.headers.get("user-agent"),
-                        request_id=uuid.uuid4(),
+                        request_id=request_id,
                     )
                     session.add(log)
                     await session.commit()
-            except Exception:
-                pass  # Never let audit failure affect the main response
+            except Exception as audit_error:
+                logger.error(
+                    "Request audit persistence failed",
+                    extra={
+                        "request_id": str(request_id),
+                        "audit_stage": "middleware",
+                        "request_method": request.method,
+                        "entity_type": entity_type,
+                        "error_type": type(audit_error).__name__,
+                    },
+                )
 
         return response

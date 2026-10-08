@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 class AssistantMessage(BaseModel):
     role: Literal["user", "assistant"]
-    content: str = Field(min_length=1, max_length=6000)
+    content: str = Field(min_length=1, max_length=20000)
 
 
 class AssistantChatRequest(BaseModel):
@@ -27,10 +27,31 @@ class PendingAssistantAction(BaseModel):
     expires_at: str
 
 
+class PendingAssistantImport(BaseModel):
+    filename: str
+    sheet_name: str
+    source_row_count: int
+    material_count: int
+    mapping: dict[str, str]
+    normalized_rows: list[list]
+    normalized_rows_truncated: bool = False
+    conversion_count: int
+    conversions: list[dict] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    blocking_errors: list[str] = Field(default_factory=list)
+    import_rows: list[dict] = Field(default_factory=list)
+
+
 class AssistantChatResponse(BaseModel):
     message: str
     pending_actions: list[PendingAssistantAction] = Field(default_factory=list)
+    pending_import: PendingAssistantImport | None = None
     model: str
+
+
+class AssistantHistoryResponse(BaseModel):
+    messages: list[AssistantMessage] = Field(default_factory=list)
+    updated_at: datetime | None = None
 
 
 class AssistantBackupResponse(BaseModel):
@@ -53,6 +74,7 @@ class AssistantActionConfirmRequest(BaseModel):
 
 class AssistantActionConfirmResponse(BaseModel):
     message: str
+    request_id: uuid.UUID
     entity_type: Literal["material", "project", "experiment", "sample", "property", "test", "test_measurement", "characterization"]
     entity_id: str | None = None
     data: dict

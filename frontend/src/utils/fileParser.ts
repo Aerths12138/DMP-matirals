@@ -4,10 +4,12 @@
  */
 
 import * as XLSX from 'xlsx';
+import { detectStructuredDataset, type StructuredDatasetPreview } from './structuredImport.js';
 
 export interface CsvData {
   headers: string[];
   rows: string[][];
+  structuredDataset?: StructuredDatasetPreview;
 }
 
 /**
@@ -29,12 +31,12 @@ export function parseFile(file: File): Promise<CsvData> {
           // Auto-detect encoding for CSV
           const text = detectAndDecode(buffer);
           const workbook = XLSX.read(text, { type: 'string', raw: true });
-          resolve(extractData(workbook));
+          resolve(extractData(workbook, file.name));
         } else {
           // Excel files: SheetJS handles encoding internally
           const data = new Uint8Array(buffer);
           const workbook = XLSX.read(data, { type: 'array' });
-          resolve(extractData(workbook));
+          resolve(extractData(workbook, file.name));
         }
       } catch (err) {
         reject(err);
@@ -51,7 +53,7 @@ export function parseFile(file: File): Promise<CsvData> {
  * Attempts UTF-8 first; falls back to GBK if high bytes are present
  * and the UTF-8 result contains unexpected characters.
  */
-function detectAndDecode(buffer: ArrayBuffer): string {
+export function detectAndDecode(buffer: ArrayBuffer): string {
   const bytes = new Uint8Array(buffer);
 
   // Strip BOM if present (UTF-8 BOM: EF BB BF)
@@ -67,32 +69,13 @@ function detectAndDecode(buffer: ArrayBuffer): string {
     return new TextDecoder('utf-8').decode(bytes.slice(start));
   }
 
-  // Try UTF-8 first
-  const utf8Text = new TextDecoder('utf-8', { fatal: false }).decode(bytes.slice(start));
-
-  // Check if UTF-8 result looks valid (low replacement char ratio)
-  const replacementCount = (utf8Text.match(/�/g) || []).length;
-  const totalChars = utf8Text.length;
-
-  if (totalChars > 0 && replacementCount / totalChars < 0.05) {
-    // UTF-8 looks good
-    return utf8Text;
-  }
-
-  // UTF-8 had many replacement chars — try GBK
+  // Decode UTF-8 strictly so legacy Chinese encodings cannot be mistaken for UTF-8.
   try {
-    const gbkText = new TextDecoder('gbk', { fatal: false }).decode(bytes.slice(start));
-    const gbkReplacement = (gbkText.match(/�/g) || []).length;
-
-    // Use whichever has fewer replacement characters
-    if (gbkReplacement < replacementCount) {
-      return gbkText;
-    }
+    return new TextDecoder('utf-8', { fatal: true }).decode(bytes.slice(start));
   } catch {
-    // GBK decoder not available (e.g., Firefox) — keep UTF-8 result
+    // Instrument exports commonly use GBK/GB18030. Browsers expose this as gb18030.
+    return new TextDecoder('gb18030', { fatal: false }).decode(bytes.slice(start));
   }
-
-  return utf8Text;
 }
 
 /**
@@ -110,7 +93,7 @@ function deduplicateHeaders(headers: string[]): string[] {
   });
 }
 
-function extractData(workbook: XLSX.WorkBook): CsvData {
+function extractData(workbook: XLSX.WorkBook, filename: string): CsvData {
   const firstSheet = workbook.SheetNames[0];
   if (!firstSheet) {
     return { headers: [], rows: [] };
@@ -129,6 +112,10 @@ function extractData(workbook: XLSX.WorkBook): CsvData {
     return { headers: [], rows: [] };
   }
 
+  const matrix = aoa.map((row) => row.map((value) => value == null ? '' : String(value).trim()));
+  const fallbackTitle = filename.replace(/\.[^.]+$/, '');
+  const structuredDataset = detectStructuredDataset(matrix, fallbackTitle) || undefined;
+
   const headers = aoa[0].map((h) => String(h ?? '').trim());
   // Replace empty headers with placeholder names, then deduplicate
   const rawHeaders = headers.map((h, i) => h || `列${i + 1}`);
@@ -144,7 +131,15 @@ function extractData(workbook: XLSX.WorkBook): CsvData {
   // Filter completely empty rows
   const nonEmptyRows = rows.filter((r) => r.some((v) => v !== ''));
 
-  return { headers: cleanHeaders, rows: nonEmptyRows };
+  return { headers: cleanHeaders, rows: nonEmptyRows, structuredDataset };
+}
+
+/** Parse a workbook buffer outside the browser upload control (used by regression checks). */
+export function parseWorkbookBuffer(buffer: ArrayBuffer, filename: string): CsvData {
+  const workbook = filename.toLowerCase().endsWith('.csv')
+    ? XLSX.read(detectAndDecode(buffer), { type: 'string', raw: true })
+    : XLSX.read(new Uint8Array(buffer), { type: 'array' });
+  return extractData(workbook, filename);
 }
 
 /**
