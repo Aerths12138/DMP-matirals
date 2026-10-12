@@ -270,6 +270,162 @@ async def test_assistant_returns_plain_answer(api, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_measurement_analysis_returns_reproducible_unit_safe_card(api, monkeypatch):
+    headers, ids = await _create_ai_data_manager(api, "measurement_analysis")
+    async with api.session_factory() as session:
+        session.add_all(
+            [
+                Property(
+                    material_id=ids["material"],
+                    property_type="mechanical",
+                    property_name="tensile_strength",
+                    value_number=10.0,
+                    unit="MPa",
+                    conditions={"temperature": "25 C"},
+                    test_method="ASTM-D638",
+                    is_validated=True,
+                ),
+                Property(
+                    material_id=ids["material"],
+                    property_type="mechanical",
+                    property_name="tensile_strength",
+                    value_number=0.011,
+                    unit="GPa",
+                    conditions={"temperature": "25 C"},
+                    test_method="ASTM-D638",
+                    is_validated=True,
+                ),
+                Property(
+                    material_id=ids["material"],
+                    property_type="mechanical",
+                    property_name="tensile_strength",
+                    value_number=12.0,
+                    unit="MPa",
+                    conditions={"temperature": "25 C"},
+                    test_method="ASTM-D638",
+                    is_validated=True,
+                ),
+                Property(
+                    material_id=ids["material"],
+                    property_type="mechanical",
+                    property_name="tensile_strength",
+                    value_number=100.0,
+                    unit="MPa",
+                    conditions={"temperature": "25 C"},
+                    test_method="ASTM-D638",
+                    is_validated=True,
+                ),
+            ]
+        )
+        await session.commit()
+
+    async def fake_llm(messages, tools):
+        if messages[-1]["role"] == "tool":
+            tool_result = json.loads(messages[-1]["content"])
+            assert tool_result["ok"] is True
+            assert tool_result["data"]["query_plan"]["engine"].startswith(
+                "permission-scoped"
+            )
+            return {"role": "assistant", "content": "已按材料汇总，并保留了质量提示。"}
+        assert "analyze_measurements" in {
+            item["function"]["name"] for item in (tools or [])
+        }
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "measurement-analysis",
+                    "type": "function",
+                    "function": {
+                        "name": "analyze_measurements",
+                        "arguments": json.dumps(
+                            {
+                                "property_name": "tensile_strength",
+                                "source": "properties",
+                                "material_ids": [str(ids["material"])],
+                                "group_by": "material",
+                                "validated_only": True,
+                            }
+                        ),
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
+    response = await api.client.post(
+        CHAT_URL,
+        headers=headers,
+        json={"messages": [{"role": "user", "content": "比较拉伸强度并检查异常值"}]},
+    )
+
+    assert response.status_code == 200, response.text
+    cards = response.json()["analysis_cards"]
+    assert len(cards) == 1
+    card = cards[0]
+    assert card["quality"]["numeric_records"] == 4
+    assert card["quality"]["outlier_count"] == 1
+    assert card["groups"][0]["unit"] == "MPa"
+    assert card["groups"][0]["mean"] == 33.25
+    assert len(card["provenance"]["record_references"]) == 4
+
+
+@pytest.mark.asyncio
+async def test_measurement_analysis_respects_private_project_visibility(api, monkeypatch):
+    owner_headers, owner_ids = await _create_ai_data_manager(api, "analysis_owner")
+    reader_headers, _reader_ids = await _create_ai_data_manager(api, "analysis_reader")
+    async with api.session_factory() as session:
+        session.add(
+            Property(
+                material_id=owner_ids["material"],
+                property_type="thermal",
+                property_name="private_conductivity",
+                value_number=42.0,
+                unit="W/(m*K)",
+                is_validated=True,
+            )
+        )
+        await session.commit()
+
+    async def fake_llm(messages, tools):
+        if messages[-1]["role"] == "tool":
+            return {"role": "assistant", "content": "分析完成。"}
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "private-analysis",
+                    "type": "function",
+                    "function": {
+                        "name": "analyze_measurements",
+                        "arguments": json.dumps(
+                            {
+                                "property_name": "private_conductivity",
+                                "source": "properties",
+                            }
+                        ),
+                    },
+                }
+            ],
+        }
+
+    monkeypatch.setattr(assistant_service, "request_llm", fake_llm)
+    response = await api.client.post(
+        CHAT_URL,
+        headers=reader_headers,
+        json={"messages": [{"role": "user", "content": "分析私有导热率"}]},
+    )
+
+    assert response.status_code == 200, response.text
+    card = response.json()["analysis_cards"][0]
+    assert card["quality"]["records_returned"] == 0
+    assert card["provenance"]["record_references"] == []
+    assert owner_headers != reader_headers
+
+
+@pytest.mark.asyncio
 async def test_assistant_history_is_persisted_and_user_scoped(api, monkeypatch):
     async def fake_llm(messages, tools):
         return {"role": "assistant", "content": "这是保存后的回答。"}

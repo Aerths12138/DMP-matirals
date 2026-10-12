@@ -33,10 +33,87 @@ export interface AssistantBackup {
   restored_at: string | null;
 }
 
+export interface AssistantAnalysisGroup {
+  label: string;
+  unit: string;
+  count: number;
+  mean: number | null;
+  median: number | null;
+  min: number | null;
+  max: number | null;
+  std_dev: number | null;
+  outlier_count: number;
+}
+
+export interface AssistantAnalysisCard {
+  analysis_id: string;
+  title: string;
+  metric: string;
+  groups: AssistantAnalysisGroup[];
+  quality: {
+    records_returned: number;
+    numeric_records: number;
+    missing_numeric_records: number;
+    unit_groups: string[];
+    condition_variants: number;
+    test_method_variants: number;
+    outlier_count: number;
+    outlier_method: string;
+    truncated: boolean;
+  };
+  provenance: {
+    generated_at: string;
+    record_references: Array<Record<string, unknown>>;
+    record_references_truncated: boolean;
+  };
+  query_plan: Record<string, unknown>;
+  limitations: string[];
+  chart: {
+    type: 'mean_bar';
+    x_label: string;
+    y_label: string;
+    points: Array<{ label: string; mean: number | null; count: number; unit: string }>;
+  };
+}
+
+export interface AssistantKnowledgeCitation {
+  file_id: string;
+  file_name: string;
+  parent_type: string;
+  parent_id: string;
+  download_url: string;
+  chunk_index: number;
+  page_start: number | null;
+  page_end: number | null;
+  source_type: string;
+  source_metadata: Record<string, unknown>;
+}
+
+export interface AssistantKnowledgeCard {
+  query: string;
+  items: Array<{
+    score: number;
+    excerpt: string;
+    citation: AssistantKnowledgeCitation;
+  }>;
+  retrieval: {
+    engine: string;
+    version: string;
+    semantic_embeddings: boolean;
+    candidate_chunks_checked: number;
+    visible_candidate_chunks: number;
+    returned: number;
+    scope: string;
+  };
+  limitations: string[];
+}
+
 export interface AssistantChatResponse {
   message: string;
   pending_actions: PendingAssistantAction[];
   pending_import?: AssistantImportPreview | null;
+  analysis_cards: AssistantAnalysisCard[];
+  knowledge_cards: AssistantKnowledgeCard[];
   model: string;
 }
 

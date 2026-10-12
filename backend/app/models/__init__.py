@@ -13,6 +13,7 @@ from app.models.characterization import Characterization
 from app.models.crystal_structure import CrystalStructure
 from app.models.experiment import Experiment
 from app.models.file import File
+from app.models.research_knowledge import ResearchKnowledgeChunk
 from app.models.material import Material
 from app.models.measurement_dataset import MeasurementDataset, MeasurementPoint
 from app.models.data_standard import MetadataTemplate, UnitDefinition
@@ -43,6 +44,7 @@ __all__ = [
     "ElectricalProperties",
     "Experiment",
     "File",
+    "ResearchKnowledgeChunk",
     "MagneticProperties",
     "Material",
     "MeasurementDataset",

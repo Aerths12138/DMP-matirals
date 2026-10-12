@@ -91,6 +91,15 @@ class Settings(BaseSettings):
     ASSISTANT_ACTION_EXPIRE_MINUTES: int = 10
     ASSISTANT_BACKUP_RETENTION_HOURS: int = 24
 
+    # Research-document RAG.  These bounds keep synchronous ingestion safe for
+    # local deployment; production can move the same service to a worker.
+    RAG_MAX_FILE_SIZE_BYTES: int = Field(default=20 * 1024 * 1024, ge=1024)
+    RAG_CHUNK_SIZE_CHARS: int = Field(default=1600, ge=300, le=6000)
+    RAG_CHUNK_OVERLAP_CHARS: int = Field(default=180, ge=0, le=1200)
+    RAG_MAX_CHUNKS_PER_FILE: int = Field(default=160, ge=1, le=1000)
+    RAG_MAX_EXCEL_CELLS: int = Field(default=10000, ge=100, le=100000)
+    RAG_MAX_RETRIEVAL_CANDIDATES: int = Field(default=400, ge=20, le=2000)
+
     @property
     def assistant_api_key(self) -> str | None:
         return self.LLM_API_KEY or self.DEEPSEEK_API_KEY

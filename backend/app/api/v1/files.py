@@ -24,6 +24,7 @@ from app.models.user import User
 from app.schemas.common import PaginatedResponse, PaginationParams
 from app.schemas.file import FileResponse as FileResp, FileUploadResponse
 from app.services.file_storage_service import get_storage_backend
+from app.services import research_knowledge_service
 
 router = APIRouter(prefix="/files", tags=["Files"])
 storage = get_storage_backend()
@@ -242,6 +243,14 @@ async def upload_file(
     )
     db.add(db_file)
     await db.flush()
+    try:
+        stored_bytes = await storage.download(db_file.stored_path)
+        await research_knowledge_service.index_file_bytes(db, db_file, stored_bytes)
+    except Exception as exc:  # The source file remains available even if derived indexing fails.
+        db_file.knowledge_status = "failed"
+        db_file.knowledge_error = research_knowledge_service._error_message(exc)
+        db_file.knowledge_chunk_count = 0
+    await db.flush()
     await db.refresh(db_file)
 
     return FileUploadResponse(
@@ -250,7 +259,35 @@ async def upload_file(
         mime_type=db_file.mime_type,
         file_size_bytes=db_file.file_size_bytes,
         download_url=f"/api/v1/files/{db_file.id}/download",
+        knowledge=research_knowledge_service.index_status(db_file),
     )
+
+
+@router.post("/{file_id}/knowledge/reindex")
+async def reindex_file_knowledge(
+    file_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(require_permission("file:upload")),
+):
+    """Rebuild RAG chunks from the original attachment after an extraction upgrade."""
+    db_file = await _get_file(db, file_id)
+    await _ensure_parent_access(
+        db,
+        current_user,
+        db_file.parent_type,
+        db_file.parent_id,
+        "editor",
+    )
+    try:
+        stored_bytes = await storage.download(db_file.stored_path)
+    except FileNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="File not found in storage",
+        ) from None
+    knowledge = await research_knowledge_service.index_file_bytes(db, db_file, stored_bytes)
+    await db.flush()
+    return {"file_id": str(db_file.id), "knowledge": knowledge}
 
 
 @router.get("/{file_id}", response_model=FileResp)

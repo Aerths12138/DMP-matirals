@@ -27,6 +27,8 @@ from app.models.user import User
 from app.schemas.assistant import (
     AssistantActionConfirmRequest,
     AssistantActionConfirmResponse,
+    AssistantAnalysisCard,
+    AssistantKnowledgeCard,
     AssistantBackupResponse,
     AssistantBackupRestoreResponse,
     AssistantChatRequest,
@@ -71,7 +73,7 @@ async def _run_assistant_chat(
     attachments: list[dict] | None = None,
     attachment_import: dict | None = None,
 ) -> AssistantChatResponse:
-    message, pending_actions, pending_import = await assistant_service.chat(
+    message, pending_actions, pending_import, analysis_cards, knowledge_cards = await assistant_service.chat(
         [item.model_dump() for item in body.messages],
         body.context_path,
         db,
@@ -91,6 +93,8 @@ async def _run_assistant_chat(
         message=message,
         pending_actions=pending_actions,
         pending_import=pending_import,
+        analysis_cards=[AssistantAnalysisCard.model_validate(item) for item in analysis_cards],
+        knowledge_cards=[AssistantKnowledgeCard.model_validate(item) for item in knowledge_cards],
         model=settings.assistant_model,
     )
 

@@ -27,6 +27,15 @@ import {
 } from '@ant-design/icons';
 import { useQueryClient } from '@tanstack/react-query';
 import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip as RechartsTooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import {
   chatWithAssistant,
   chatWithAssistantExcel,
   clearAssistantHistory,
@@ -35,7 +44,9 @@ import {
   listAssistantBackups,
   restoreAssistantBackup,
   type AssistantBackup,
+  type AssistantAnalysisCard,
   type AssistantImportPreview,
+  type AssistantKnowledgeCard,
   type PendingAssistantAction,
 } from '../../api/assistant';
 import { importMaterials } from '../../api/materials';
@@ -95,12 +106,169 @@ function createId() {
   return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function MeasurementAnalysisCard({ analysis }: { analysis: AssistantAnalysisCard }) {
+  const chartPoints = analysis.chart.points.filter((point) => point.mean !== null);
+  const chartUnits = new Set(chartPoints.map((point) => point.unit));
+  const canChart = chartPoints.length > 0 && chartUnits.size === 1;
+
+  return (
+    <Card
+      size="small"
+      title={analysis.title}
+      style={{ marginBottom: 16, borderColor: '#1677ff' }}
+      extra={<Tag color="blue">可复现分析</Tag>}
+    >
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Space wrap>
+          <Tag color="green">有效数值 {analysis.quality.numeric_records}</Tag>
+          <Tag>返回记录 {analysis.quality.records_returned}</Tag>
+          <Tag color={analysis.quality.outlier_count ? 'gold' : 'default'}>
+            IQR 异常值 {analysis.quality.outlier_count}
+          </Tag>
+          <Tag color={analysis.quality.truncated ? 'orange' : 'default'}>
+            {analysis.quality.truncated ? '结果已截断' : '范围完整'}
+          </Tag>
+        </Space>
+
+        {canChart ? (
+          <div style={{ height: 240 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <BarChart data={chartPoints} margin={{ top: 12, right: 8, bottom: 36, left: 8 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="label" angle={-20} textAnchor="end" interval={0} height={62} />
+                <YAxis />
+                <RechartsTooltip
+                  formatter={(value: number, _name: string, item) => [
+                    `${value} ${item.payload.unit}`,
+                    `均值（n=${item.payload.count}）`,
+                  ]}
+                />
+                <Bar dataKey="mean" name="均值" fill="#1677ff" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        ) : chartPoints.length > 0 ? (
+          <Alert
+            type="warning"
+            showIcon
+            message="检测到多种不兼容单位，未绘制混合单位柱状图"
+            description="统计已按单位拆分；请筛选单一单位或在确认换算规则后再比较。"
+          />
+        ) : (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有可绘图的数值记录" />
+        )}
+
+        {analysis.groups.length > 0 && (
+          <div style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', padding: 6 }}>分组</th>
+                  <th style={{ textAlign: 'right', padding: 6 }}>n</th>
+                  <th style={{ textAlign: 'right', padding: 6 }}>均值</th>
+                  <th style={{ textAlign: 'right', padding: 6 }}>中位数</th>
+                  <th style={{ textAlign: 'right', padding: 6 }}>范围</th>
+                </tr>
+              </thead>
+              <tbody>
+                {analysis.groups.map((group) => (
+                  <tr key={`${group.label}-${group.unit}`}>
+                    <td style={{ padding: 6 }}>{group.label}</td>
+                    <td style={{ textAlign: 'right', padding: 6 }}>{group.count}</td>
+                    <td style={{ textAlign: 'right', padding: 6 }}>
+                      {group.mean ?? '—'} {group.mean !== null ? group.unit : ''}
+                    </td>
+                    <td style={{ textAlign: 'right', padding: 6 }}>
+                      {group.median ?? '—'} {group.median !== null ? group.unit : ''}
+                    </td>
+                    <td style={{ textAlign: 'right', padding: 6 }}>
+                      {group.min ?? '—'} – {group.max ?? '—'} {group.min !== null ? group.unit : ''}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {analysis.limitations.length > 0 && (
+          <Alert
+            type="info"
+            showIcon
+            message="解释边界与数据质量提示"
+            description={analysis.limitations.join('；')}
+          />
+        )}
+
+        <details>
+          <summary style={{ cursor: 'pointer', color: '#1677ff' }}>查看查询计划与数据溯源</summary>
+          <pre
+            style={{
+              margin: '8px 0 0', padding: 8, maxHeight: 220, overflow: 'auto',
+              background: '#fafafa', fontSize: 12, whiteSpace: 'pre-wrap',
+            }}
+          >
+            {JSON.stringify({ query_plan: analysis.query_plan, provenance: analysis.provenance }, null, 2)}
+          </pre>
+        </details>
+      </Space>
+    </Card>
+  );
+}
+
+function ResearchKnowledgeCard({ knowledge }: { knowledge: AssistantKnowledgeCard }) {
+  const engineLabel = knowledge.retrieval.semantic_embeddings ? '语义检索' : '全文检索';
+
+  return (
+    <Card
+      size="small"
+      title={`科研资料检索：${knowledge.query}`}
+      style={{ marginBottom: 16, borderColor: '#13c2c2' }}
+      extra={<Tag color="cyan">{engineLabel} · 可溯源</Tag>}
+    >
+      <Space direction="vertical" size={10} style={{ width: '100%' }}>
+        <Typography.Text type="secondary">
+          在当前有权访问的附件中返回 {knowledge.retrieval.returned} 段证据；权限在每次检索时重新校验。
+        </Typography.Text>
+        {knowledge.items.length === 0 ? (
+          <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="没有检索到可引用的附件内容" />
+        ) : knowledge.items.map(({ score, excerpt, citation }) => {
+          const location = citation.page_start
+            ? `第 ${citation.page_start}${citation.page_end && citation.page_end !== citation.page_start ? `–${citation.page_end}` : ''} 页`
+            : typeof citation.source_metadata.sheet_name === 'string'
+              ? `工作表：${citation.source_metadata.sheet_name}`
+              : `片段 #${citation.chunk_index + 1}`;
+          return (
+            <Card key={`${citation.file_id}-${citation.chunk_index}`} type="inner" size="small">
+              <Space direction="vertical" size={4} style={{ width: '100%' }}>
+                <Space wrap>
+                  <a href={citation.download_url} target="_blank" rel="noreferrer">{citation.file_name}</a>
+                  <Tag>{location}</Tag>
+                  <Tag color="default">相关度 {score.toFixed(2)}</Tag>
+                </Space>
+                <Typography.Paragraph style={{ marginBottom: 0, whiteSpace: 'pre-wrap' }}>
+                  {excerpt}
+                </Typography.Paragraph>
+              </Space>
+            </Card>
+          );
+        })}
+        {knowledge.limitations.length > 0 && (
+          <Alert type="info" showIcon message="检索边界" description={knowledge.limitations.join('；')} />
+        )}
+      </Space>
+    </Card>
+  );
+}
+
 export default function AIAssistantPage() {
   const queryClient = useQueryClient();
   const [messages, setMessages] = useState<DisplayAssistantMessage[]>(() => (
     restoreAssistantConversation([], WELCOME_MESSAGE, createId)
   ));
   const [actions, setActions] = useState<DisplayAction[]>([]);
+  const [analysisCards, setAnalysisCards] = useState<AssistantAnalysisCard[]>([]);
+  const [knowledgeCards, setKnowledgeCards] = useState<AssistantKnowledgeCard[]>([]);
   const [backups, setBackups] = useState<AssistantBackup[]>([]);
   const [loadingBackups, setLoadingBackups] = useState(false);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -223,6 +391,12 @@ export default function AIAssistantPage() {
         ...current,
         { id: createId(), role: 'assistant', content: response.message },
       ]);
+      if (response.analysis_cards.length) {
+        setAnalysisCards((current) => [...current, ...response.analysis_cards].slice(-5));
+      }
+      if (response.knowledge_cards.length) {
+        setKnowledgeCards((current) => [...current, ...response.knowledge_cards].slice(-5));
+      }
       if (response.pending_actions.length) {
         setActions((current) => [
           ...current,
@@ -303,6 +477,8 @@ export default function AIAssistantPage() {
       await clearAssistantHistory();
       setMessages(restoreAssistantConversation([], WELCOME_MESSAGE, createId));
       setActions([]);
+      setAnalysisCards([]);
+      setKnowledgeCards([]);
       setInput('');
       setFileState(removeAssistantExcelFile<File>());
       clearSheetSelection();
@@ -555,6 +731,14 @@ export default function AIAssistantPage() {
             </Space>
           </Card>
         )}
+
+        {analysisCards.map((analysis) => (
+          <MeasurementAnalysisCard key={analysis.analysis_id} analysis={analysis} />
+        ))}
+
+        {knowledgeCards.map((knowledge, index) => (
+          <ResearchKnowledgeCard key={`${knowledge.query}-${index}`} knowledge={knowledge} />
+        ))}
 
         {(loadingBackups || backups.length > 0) && (
           <div style={{ marginBottom: 16 }}>

@@ -29,12 +29,24 @@ class File(Base):
     image_channels = Column(Integer)
     pixel_scale_um = Column(Float)
     tags = Column(JSON, default=list)
+    # RAG ingestion state is metadata only; source text lives in
+    # ResearchKnowledgeChunk and inherits this file's parent ACL at retrieval.
+    knowledge_status = Column(String(20), nullable=False, default="pending", index=True)
+    knowledge_chunk_count = Column(Integer, nullable=False, default=0)
+    knowledge_indexed_at = Column(DateTime, nullable=True)
+    knowledge_error = Column(Text, nullable=True)
     uploaded_by = Column(Uuid, ForeignKey("users.id"))
     created_at = Column(DateTime, default=func.now())
 
     # Relationships — we use foreign_keys on the other side, so no back_populates needed here.
     # Instead, use dynamic relationship lookups.
     uploader = relationship("User", foreign_keys=[uploaded_by], lazy="selectin")
+    knowledge_chunks = relationship(
+        "ResearchKnowledgeChunk",
+        back_populates="file",
+        cascade="all, delete-orphan",
+        order_by="ResearchKnowledgeChunk.chunk_index",
+    )
 
     # Convenience accessors for parent entities
     material = relationship(

@@ -20,7 +20,11 @@ class FileResponse(BaseModel):
     description: str | None = None
     image_width: int | None = None
     image_height: int | None = None
-    tags: list[str] = []
+    tags: list[str] = Field(default_factory=list)
+    knowledge_status: str = "pending"
+    knowledge_chunk_count: int = 0
+    knowledge_indexed_at: datetime | None = None
+    knowledge_error: str | None = None
     uploaded_by: uuid.UUID | None = None
     created_at: datetime
 
@@ -34,6 +38,7 @@ class FileUploadResponse(BaseModel):
     file_size_bytes: int | None = None
     thumbnail_url: str | None = None
     download_url: str
+    knowledge: dict = Field(default_factory=dict)
 
 
 # ── Audit ────────────────────────────────────────────────────────

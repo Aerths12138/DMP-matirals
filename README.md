@@ -44,6 +44,18 @@ npm run dev
 
 右上角的 **AI 助手** 支持材料知识问答、权限内数据查询，以及材料和项目的新增、修改、删除。写操作只会先生成预览，必须由用户确认后才会落库。AI 修改或删除数据时，服务器会在执行前保存临时快照；操作者可在 AI 助手的“可回退版本”中恢复，默认保留 24 小时且每份快照只能恢复一次。备份保留时间可通过 `ASSISTANT_BACKUP_RETENTION_HOURS` 调整。
 
+### 可复现科研 Data Agent
+
+AI 助手可对权限范围内的同名材料性能或测试测量值进行受限分析。例如，可以问“按材料比较 tensile_strength，并检查异常值”或“按温度汇总 ionic_conductivity”。后端不会让模型直接执行 SQL：它使用固定的 SQLAlchemy 查询计划，并输出可追溯的记录引用、数据范围、单位换算、缺失值提示、IQR 异常值检查和图表数据。对不能可靠换算的单位、不同测试方法或不同实验条件，系统会分开统计并明确提示比较边界。
+
+### 科研文档 RAG（全文检索 v1）
+
+上传 `.txt`、`.md`、`.csv`、`.json`、`.xml`、`.cif`、`.docx`、`.xlsx/.xlsm` 或可解析 PDF 后，系统会在保留原附件的同时抽取文本并生成带出处的检索片段。AI 可回答“我的附件里离子电导率是多少？”这类问题；结果卡片会给出原文件下载链接和 PDF 页码或 Excel 工作表。检索时会重新检查文件的材料/项目父级权限，因此私有项目附件不会因已建立索引而被其他用户召回。
+
+当前 RAG v1 采用受权限约束的全文 BM25 召回，**不宣称已启用向量语义检索**。扫描型 PDF 和图片还需要 OCR；生产环境若要接入嵌入模型或 pgvector，应先建立中文/英文材料问答、出处准确率与跨项目越权的评测集。已有附件可由有编辑权限的用户调用 `POST /api/v1/files/{file_id}/knowledge/reindex` 重建索引。
+
+首次升级后，如要为历史附件批量创建索引，可在 `backend` 目录执行 `python -m scripts.reindex_research_knowledge`；修改分块配置或解析器后执行 `python -m scripts.reindex_research_knowledge --all`。
+
 启用前请复制 `backend/.env.example` 为 `backend/.env`，并填写：
 
 ```env
