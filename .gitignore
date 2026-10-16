@@ -20,3 +20,8 @@ backend/storage/
 !backend/.env.example
 .vercel/
 !.env.production.example
+!lakehouse/.env.example
+lakehouse/.env
+lakehouse/.ivy2/
+lakehouse/spark-events/
+lakehouse/warehouse/

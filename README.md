@@ -73,6 +73,21 @@ LLM_API_KEY=模型服务_API_Key
 | 前端 | React 18 + TypeScript + Ant Design 5 |
 | 构建 | Vite 5 |
 | 状态管理 | TanStack React Query + Zustand |
+| 分析湖仓 | Apache Spark 4.1 + Apache Iceberg 1.12 |
+
+## Spark / Iceberg 数据工程湖仓
+
+`lakehouse/` 提供独立的数据工程演示环境：通过 Spark JDBC 将 PostgreSQL 增量同步到
+Iceberg bronze 层，再生成材料性能与仪器测量的 silver 宽表、gold 项目指标和数据
+质量记录。它包含 Spark Master/Worker、History Server、watermark、幂等 MERGE、
+数据质量门禁和无需业务数据库的确定性 demo 数据。
+
+```powershell
+.\lakehouse\run_pipeline.ps1 -Source demo
+```
+
+完整架构、真实 PostgreSQL 同步方式和简历表达见
+[`lakehouse/README.md`](lakehouse/README.md)。
 
 ## Phase 1 已实现功能
 
